@@ -8,7 +8,8 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, ValidationError
 from web3 import Web3
 
-from common import convert_currency_amount
+from api.bnpl_router import build_bnpl_router
+from common import EmiPlanCatalog, convert_currency_amount
 from core import FirebaseClientManager, Web3ClientManager
 from core.config import AppSettings
 from ml.deposit_inference import DepositRecommendationInferenceService
@@ -17,6 +18,7 @@ from ml.default_inference import DefaultPredictionInferenceService
 from ml.default_schema import DefaultPredictionInput
 from ml.inference import RiskModelInferenceService
 from ml.orchestration_schema import (
+    MlEmiPlanEvaluationRequest,
     MlOrchestrationRequest,
     MlPayloadAnalysisRequest,
     MlTrainingRowBuildRequest,
@@ -33,7 +35,8 @@ from ml.training_schema import (
 from models.exceptions import ModelNotFoundError, VersionConflictError
 from models.users import UserModel, WalletAddressModel
 from repositories.firestore_user_repository import FirestoreUserRepository
-from services import ProtocolApiService
+from services import ProtocolApiService, RazorpayService
+from services.bnpl_feature_service import BnplFeatureService
 from services.market_data_service import MarketDataService
 
 
@@ -50,6 +53,14 @@ class UserFromFirebaseCreateRequest(BaseModel):
     currency_symbol: str = Field(default="Rs", min_length=1, max_length=3)
     autopay_enabled: bool = Field(default=False)
     kyc_level: int = Field(default=0, ge=0, le=3)
+
+
+class UserWalletDetailsResponse(BaseModel):
+    """Response payload for user wallet details lookup."""
+
+    user_id: str = Field(..., min_length=3)
+    wallet_address: list[WalletAddressModel] = Field(default_factory=list)
+    wallet_count: int = Field(default=0, ge=0)
 
 
 class OracleUpdatePricesRequest(BaseModel):
@@ -242,6 +253,30 @@ def build_router(settings: AppSettings) -> APIRouter:
         api_key=settings.market_api_key,
         api_key_header=settings.market_api_key_header,
     )
+    emi_plan_catalog = EmiPlanCatalog(
+        path=settings.emi_plans_path,
+        default_plan_id=settings.emi_default_plan_id,
+    )
+    razorpay_service: Optional[RazorpayService] = None
+    if settings.razorpay_enabled:
+        try:
+            razorpay_service = RazorpayService(
+                enabled=settings.razorpay_enabled,
+                key_id=settings.razorpay_key_id,
+                key_secret=settings.razorpay_key_secret,
+                api_base_url=settings.razorpay_api_base_url,
+                timeout_sec=settings.razorpay_timeout_sec,
+            )
+            if not razorpay_service.is_configured:
+                logger.warning(
+                    "Razorpay is enabled but not fully configured. "
+                    "Check razorpay.key_id and razorpay.key_secret."
+                )
+        except Exception:
+            logger.exception("Failed to initialize Razorpay service.")
+            razorpay_service = None
+    else:
+        logger.info("Razorpay integration disabled by razorpay.enabled=false")
 
     firebase_manager: Optional[FirebaseClientManager] = None
     user_repository: Optional[FirestoreUserRepository] = None
@@ -319,6 +354,7 @@ def build_router(settings: AppSettings) -> APIRouter:
         risk_inference=ml_inference,
         default_inference=default_inference,
         deposit_inference=deposit_inference,
+        emi_plan_catalog=emi_plan_catalog,
     )
     ml_management_service = MlModelManagementService(
         enabled=settings.ml_enabled,
@@ -331,9 +367,19 @@ def build_router(settings: AppSettings) -> APIRouter:
         default_inference=default_inference,
         deposit_inference=deposit_inference,
     )
+    bnpl_feature_service = BnplFeatureService(
+        settings=settings,
+        protocol_service=protocol_service,
+        user_repository=user_repository,
+        firebase_manager=firebase_manager,
+        ml_orchestrator=ml_orchestrator,
+        emi_plan_catalog=emi_plan_catalog,
+        razorpay_service=razorpay_service,
+    )
 
     router.include_router(build_firebase_router(firebase_manager))
     router.include_router(build_web3_router(web3_manager, settings.web3_read_function))
+    router.include_router(build_bnpl_router(bnpl_feature_service))
 
     @router.get("/", summary="Root endpoint")
     def read_root() -> dict:
@@ -475,6 +521,10 @@ def build_router(settings: AppSettings) -> APIRouter:
             "firebase_enabled": settings.firebase_enabled,
             "web3_enabled": settings.web3_enabled,
             "ml_enabled": settings.ml_enabled,
+            "emi_plans_path": settings.emi_plans_path,
+            "emi_default_plan_id": settings.emi_default_plan_id,
+            "razorpay_enabled": settings.razorpay_enabled,
+            "razorpay_configured": bool(razorpay_service and razorpay_service.is_configured),
         }
 
     @router.get("/ml/health", summary="ML model health")
@@ -673,6 +723,19 @@ def build_router(settings: AppSettings) -> APIRouter:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
         except Exception as exc:
             logger.exception("ML orchestration endpoint failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.post("/ml/emi/evaluate", summary="Evaluate ML outputs across EMI plans")
+    def ml_emi_evaluate(payload: MlEmiPlanEvaluationRequest) -> dict:
+        """Run risk/default/deposit evaluation for all or selected EMI plans."""
+        try:
+            return ml_orchestrator.evaluate_emi_plans(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+        except Exception as exc:
+            logger.exception("ML EMI plan evaluation endpoint failed.")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
 
     @router.post("/oracle/update-prices", summary="Update oracle prices")
@@ -897,6 +960,31 @@ def build_router(settings: AppSettings) -> APIRouter:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
         except Exception as exc:
             logger.exception("Get user endpoint failed user_id=%s", user_id)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.get(
+        "/users/{user_id}/wallets",
+        summary="Get user wallet details",
+        response_model=UserWalletDetailsResponse,
+    )
+    def get_user_wallets(user_id: str) -> UserWalletDetailsResponse:
+        """Fetch only wallet details for a user by id."""
+        try:
+            user = _require_user_repository(user_repository).get_by_id(user_id)
+            wallets = list(user.wallet_address or [])
+            return UserWalletDetailsResponse(
+                user_id=user.user_id,
+                wallet_address=wallets,
+                wallet_count=len(wallets),
+            )
+        except HTTPException:
+            raise
+        except ModelNotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+        except ValidationError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        except Exception as exc:
+            logger.exception("Get user wallets endpoint failed user_id=%s", user_id)
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
 
     @router.put("/users/{user_id}", summary="Update user", response_model=UserModel)

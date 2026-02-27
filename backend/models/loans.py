@@ -32,6 +32,9 @@ class LoanModel(BaseDocumentModel):
 
     schedule_hash: Optional[str] = Field(default=None)
     installment_ids: List[str] = Field(default_factory=list)
+    emi_plan_id: Optional[str] = Field(default=None, min_length=3)
+    emi_plan_name: Optional[str] = Field(default=None)
+    emi_source_platform: Optional[str] = Field(default=None)
 
     grace_window_hours: int = Field(default=24, ge=0)
     late_fee_flat_minor: Money = Field(default=0, ge=0)

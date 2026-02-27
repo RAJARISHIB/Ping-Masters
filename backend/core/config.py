@@ -63,6 +63,13 @@ class AppSettings:
     market_symbols_cache_ttl_sec: int
     market_api_key: Optional[str]
     market_api_key_header: str
+    razorpay_enabled: bool
+    razorpay_key_id: Optional[str]
+    razorpay_key_secret: Optional[str]
+    razorpay_api_base_url: str
+    razorpay_timeout_sec: int
+    emi_plans_path: str
+    emi_default_plan_id: str
 
 
 def _to_bool(value: Any, default: bool = False) -> bool:
@@ -212,6 +219,15 @@ def load_settings() -> AppSettings:
     market_symbols_cache_ttl_sec = _to_int(market_cfg.get("symbols_cache_ttl_sec", 1800), 1800)
     market_api_key = market_cfg.get("api_key")
     market_api_key_header = str(market_cfg.get("api_key_header", "authorization"))
+    razorpay_cfg = config.get("razorpay", {})
+    razorpay_enabled = _to_bool(razorpay_cfg.get("enabled", False), False)
+    razorpay_key_id = razorpay_cfg.get("key_id")
+    razorpay_key_secret = razorpay_cfg.get("key_secret")
+    razorpay_api_base_url = str(razorpay_cfg.get("api_base_url", "https://api.razorpay.com"))
+    razorpay_timeout_sec = _to_int(razorpay_cfg.get("timeout_sec", 15), 15)
+    emi_cfg = config.get("emi", {})
+    emi_plans_path = str(emi_cfg.get("plans_path", _BASE_DIR / "settings" / "emi_plans.json"))
+    emi_default_plan_id = str(emi_cfg.get("default_plan_id", "bnpl_pay_in_4"))
 
     return AppSettings(
         app_name=app_name,
@@ -258,4 +274,11 @@ def load_settings() -> AppSettings:
         market_symbols_cache_ttl_sec=market_symbols_cache_ttl_sec,
         market_api_key=market_api_key,
         market_api_key_header=market_api_key_header,
+        razorpay_enabled=razorpay_enabled,
+        razorpay_key_id=razorpay_key_id,
+        razorpay_key_secret=razorpay_key_secret,
+        razorpay_api_base_url=razorpay_api_base_url,
+        razorpay_timeout_sec=razorpay_timeout_sec,
+        emi_plans_path=emi_plans_path,
+        emi_default_plan_id=emi_default_plan_id,
     )

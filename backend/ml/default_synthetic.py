@@ -6,6 +6,11 @@ import logging
 import numpy as np
 import pandas as pd
 
+try:
+    from common.emi_plan_catalog import get_default_emi_plan_catalog
+except ImportError:  # pragma: no cover - compatibility for script package style imports
+    from backend.common.emi_plan_catalog import get_default_emi_plan_catalog
+
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +18,30 @@ logger = logging.getLogger(__name__)
 def generate_synthetic_default_dataset(rows: int = 12000, seed: int = 42) -> pd.DataFrame:
     """Generate synthetic installment-event data with leakage-safe style features."""
     rng = np.random.default_rng(seed)
+    plans = get_default_emi_plan_catalog().list_plan_models(include_disabled=False)
+    if plans:
+        selected_indices = rng.integers(0, len(plans), size=rows)
+        selected_plans = [plans[idx] for idx in selected_indices]
+        tenure_days = np.array([plan.tenure_days for plan in selected_plans], dtype=int)
+        installment_count = np.array([plan.installment_count for plan in selected_plans], dtype=int)
+        cadence_days = np.array([plan.cadence_days for plan in selected_plans], dtype=int)
+        emi_plan_id = np.array([plan.plan_id for plan in selected_plans], dtype=object)
+        plan_amount = np.array(
+            [
+                rng.uniform(
+                    max(float(plan.principal_min_minor), 1000.0),
+                    max(float(plan.principal_max_minor), max(float(plan.principal_min_minor), 1000.0) + 1.0),
+                )
+                for plan in selected_plans
+            ],
+            dtype=float,
+        )
+    else:
+        tenure_days = rng.choice([30, 60, 90, 120, 180], size=rows)
+        installment_count = np.clip((tenure_days / 30).astype(int), 1, None)
+        cadence_days = np.maximum(1, (tenure_days / np.maximum(installment_count, 1)).astype(int))
+        emi_plan_id = np.array(["fallback_plan"] * rows, dtype=object)
+        plan_amount = rng.uniform(1000, 150000, size=rows)
 
     base_time = datetime.now(timezone.utc) - timedelta(days=180)
     day_offsets = rng.integers(0, 180, size=rows)
@@ -26,10 +55,11 @@ def generate_synthetic_default_dataset(rows: int = 12000, seed: int = 42) -> pd.
     days_since_last_late = np.clip(rng.gamma(2.5, 8.0, size=rows), 0, 180)
     consecutive_on_time_count = rng.poisson(4.0, size=rows)
 
-    plan_amount = rng.uniform(1000, 150000, size=rows)
-    tenure_days = rng.choice([30, 60, 90, 120, 180], size=rows)
-    installment_number = rng.integers(1, 7, size=rows)
-    installment_amount = np.maximum(plan_amount / np.maximum(tenure_days / 30, 1), 100)
+    installment_number = np.array(
+        [rng.integers(1, max(int(installment_count[idx]), 1) + 1) for idx in range(rows)],
+        dtype=int,
+    )
+    installment_amount = np.maximum(plan_amount / np.maximum(installment_count, 1), 100)
     days_until_due = np.clip(rng.normal(2.0, 1.2, size=rows), 0, 7)
 
     current_safety_ratio = np.clip(rng.normal(1.35, 0.35, size=rows), 0.65, 2.5)
@@ -98,6 +128,9 @@ def generate_synthetic_default_dataset(rows: int = 12000, seed: int = 42) -> pd.
             "tx_count_30d": tx_count_30d,
             "stablecoin_balance_bucket": stablecoin_balance_bucket,
             "y_miss_next": y_miss_next,
+            "emi_plan_id": emi_plan_id,
+            "installment_count": installment_count,
+            "cadence_days": cadence_days,
         }
     )
     logger.info("Generated synthetic default dataset rows=%d", rows)

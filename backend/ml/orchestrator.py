@@ -6,13 +6,18 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
 from pydantic import BaseModel, ValidationError
 
+try:
+    from common.emi_plan_catalog import EmiPlanCatalog, EmiPlanModel, get_default_emi_plan_catalog
+except ImportError:  # pragma: no cover - compatibility for namespace-style imports
+    from backend.common.emi_plan_catalog import EmiPlanCatalog, EmiPlanModel, get_default_emi_plan_catalog
+
 from .default_inference import DefaultPredictionInferenceService
 from .default_schema import DefaultPredictionInput
 from .deposit_inference import DepositRecommendationInferenceService
 from .deposit_policy import recommend_deposit_by_policy
 from .deposit_schema import DepositRecommendationRequest
 from .inference import RiskModelInferenceService
-from .orchestration_schema import MlOrchestrationRequest
+from .orchestration_schema import MlEmiPlanEvaluationRequest, MlOrchestrationRequest
 from .schema import RiskFeatureInput
 
 
@@ -110,19 +115,65 @@ class MlPayloadOrchestrator:
         risk_inference: Optional[RiskModelInferenceService],
         default_inference: Optional[DefaultPredictionInferenceService],
         deposit_inference: Optional[DepositRecommendationInferenceService],
+        emi_plan_catalog: Optional[EmiPlanCatalog] = None,
     ) -> None:
         self._ml_enabled = bool(ml_enabled)
         self._risk_inference = risk_inference
         self._default_inference = default_inference
         self._deposit_inference = deposit_inference
+        self._emi_plan_catalog = emi_plan_catalog or get_default_emi_plan_catalog()
+
+    def _apply_emi_defaults(
+        self,
+        payload: Dict[str, Any],
+        force: bool = False,
+    ) -> Tuple[Dict[str, Any], Optional[EmiPlanModel]]:
+        """Apply EMI plan defaults when `emi_plan_id` is present or resolvable."""
+        try:
+            normalized_payload = dict(payload or {})
+            merged_payload, plan = self._emi_plan_catalog.apply_plan_defaults(normalized_payload, force=force)
+            return merged_payload, plan
+        except Exception:
+            logger.exception("Failed applying EMI defaults payload=%s force=%s", payload, force)
+            return dict(payload or {}), None
+
+    def _resolve_emi_plans(self, plan_ids: Optional[List[str]] = None) -> List[EmiPlanModel]:
+        """Resolve target EMI plans for batch evaluation requests."""
+        try:
+            if plan_ids:
+                resolved: List[EmiPlanModel] = []
+                for plan_id in plan_ids:
+                    plan = self._emi_plan_catalog.get_plan(plan_id, include_disabled=False)
+                    if plan is None:
+                        logger.warning("Skipping unknown EMI plan id=%s", plan_id)
+                        continue
+                    resolved.append(plan)
+                return resolved
+            return self._emi_plan_catalog.list_plan_models(include_disabled=False)
+        except Exception:
+            logger.exception("Failed resolving EMI plans plan_ids=%s", plan_ids)
+            return []
 
     def get_payload_specs(self) -> Dict[str, Any]:
         """Expose payload contracts used by ML model APIs."""
         try:
+            plan_specs = [
+                {
+                    "plan_id": plan.plan_id,
+                    "plan_name": plan.plan_name,
+                    "installment_count": plan.installment_count,
+                    "tenure_days": plan.tenure_days,
+                }
+                for plan in self._emi_plan_catalog.list_plan_models(include_disabled=False)
+            ]
             return {
                 "risk_score_payload": _model_field_specs(RiskFeatureInput),
                 "default_prediction_payload": _model_field_specs(DefaultPredictionInput),
                 "deposit_recommendation_payload": _model_field_specs(DepositRecommendationRequest),
+                "emi_plan_catalog": {
+                    "total": len(plan_specs),
+                    "plans": plan_specs,
+                },
             }
         except Exception:
             logger.exception("Failed generating payload specs.")
@@ -238,6 +289,9 @@ class MlPayloadOrchestrator:
                     row["required_collateral_inr"] = float(_to_float(label, default=0.0))
             else:
                 raise ValueError("model_type must be one of: risk, default, deposit")
+            plan_id = str((payload or {}).get("emi_plan_id") or "").strip()
+            if plan_id:
+                row["emi_plan_id"] = plan_id
             return row
         except Exception:
             logger.exception("Failed building training row model_type=%s payload=%s", model_type, payload)
@@ -246,9 +300,10 @@ class MlPayloadOrchestrator:
     def normalize_risk_payload(self, payload: Dict[str, Any]) -> RiskFeatureInput:
         """Normalize raw payload into `RiskFeatureInput`."""
         try:
+            source_payload, _ = self._apply_emi_defaults(payload, force=False)
             plan_amount = _to_float(
                 _dig(
-                    payload,
+                    source_payload,
                     [
                         ("plan_amount",),
                         ("plan_amount_inr",),
@@ -261,15 +316,21 @@ class MlPayloadOrchestrator:
                 default=0.0,
             )
             tenure_days = _to_int(
-                _dig(payload, [("tenure_days",), ("loan", "tenure_days"), ("plan", "tenure_days")]),
+                _dig(source_payload, [("tenure_days",), ("loan", "tenure_days"), ("plan", "tenure_days")]),
                 default=0,
             )
             installment_count = _to_int(
-                _dig(payload, [("installment_count",), ("loan", "installment_count"), ("plan", "installment_count")]),
+                _dig(
+                    source_payload,
+                    [("installment_count",), ("loan", "installment_count"), ("plan", "installment_count")],
+                ),
                 default=0,
             )
             installment_amount = _to_float(
-                _dig(payload, [("installment_amount",), ("plan", "installment_amount"), ("loan", "installment_amount")]),
+                _dig(
+                    source_payload,
+                    [("installment_amount",), ("plan", "installment_amount"), ("loan", "installment_amount")],
+                ),
                 default=0.0,
             )
             if installment_amount <= 0 and plan_amount > 0 and installment_count > 0:
@@ -277,7 +338,7 @@ class MlPayloadOrchestrator:
 
             outstanding_debt = _to_float(
                 _dig(
-                    payload,
+                    source_payload,
                     [
                         ("outstanding_debt",),
                         ("outstanding_debt_inr",),
@@ -290,7 +351,7 @@ class MlPayloadOrchestrator:
             )
             collateral_value = _to_float(
                 _dig(
-                    payload,
+                    source_payload,
                     [
                         ("collateral_value",),
                         ("collateral_value_inr",),
@@ -300,17 +361,17 @@ class MlPayloadOrchestrator:
                 ),
                 default=0.0,
             )
-            safety_ratio = _to_float(_dig(payload, [("safety_ratio",), ("health_factor",)]), default=0.0)
+            safety_ratio = _to_float(_dig(source_payload, [("safety_ratio",), ("health_factor",)]), default=0.0)
             if safety_ratio <= 0 and outstanding_debt > 0 and collateral_value > 0:
                 safety_ratio = collateral_value / outstanding_debt
 
             on_time_payment_count = _to_float(
-                _dig(payload, [("on_time_payment_count",), ("repayment", "on_time_payment_count")]),
+                _dig(source_payload, [("on_time_payment_count",), ("repayment", "on_time_payment_count")]),
                 default=0.0,
             )
             total_payment_count = _to_float(
                 _dig(
-                    payload,
+                    source_payload,
                     [
                         ("total_payment_count",),
                         ("repayment", "total_payment_count"),
@@ -319,27 +380,30 @@ class MlPayloadOrchestrator:
                 ),
                 default=0.0,
             )
-            on_time_ratio = _to_float(_dig(payload, [("on_time_ratio",)]), default=-1.0)
+            on_time_ratio = _to_float(_dig(source_payload, [("on_time_ratio",)]), default=-1.0)
             if on_time_ratio < 0 and total_payment_count > 0:
                 on_time_ratio = max(0.0, min(1.0, on_time_payment_count / total_payment_count))
             if on_time_ratio < 0:
                 on_time_ratio = 0.8
 
-            avg_delay_hours = _to_float(_dig(payload, [("avg_delay_hours",)]), default=-1.0)
+            avg_delay_hours = _to_float(_dig(source_payload, [("avg_delay_hours",)]), default=-1.0)
             if avg_delay_hours < 0:
-                avg_days_late = _to_float(_dig(payload, [("avg_days_late",)]), default=0.0)
+                avg_days_late = _to_float(_dig(source_payload, [("avg_days_late",)]), default=0.0)
                 avg_delay_hours = max(0.0, avg_days_late * 24.0)
 
             normalized = RiskFeatureInput(
                 safety_ratio=max(0.000001, safety_ratio),
                 missed_payment_count=_to_int(
-                    _dig(payload, [("missed_payment_count",), ("missed_count_90d",), ("repayment", "missed_payment_count")]),
+                    _dig(
+                        source_payload,
+                        [("missed_payment_count",), ("missed_count_90d",), ("repayment", "missed_payment_count")],
+                    ),
                     default=0,
                 ),
                 on_time_ratio=max(0.0, min(1.0, on_time_ratio)),
                 avg_delay_hours=max(0.0, avg_delay_hours),
                 topup_count_last_30d=_to_int(
-                    _dig(payload, [("topup_count_last_30d",), ("topup_count_30d",), ("user", "top_up_count")]),
+                    _dig(source_payload, [("topup_count_last_30d",), ("topup_count_30d",), ("user", "top_up_count")]),
                     default=0,
                 ),
                 plan_amount=max(0.000001, plan_amount),
@@ -357,89 +421,107 @@ class MlPayloadOrchestrator:
     def normalize_default_payload(self, payload: Dict[str, Any]) -> DefaultPredictionInput:
         """Normalize raw payload into `DefaultPredictionInput`."""
         try:
-            cutoff_at = _safe_iso_to_datetime(_dig(payload, [("cutoff_at",), ("cutoff_time",)]))
-            due_at = _safe_iso_to_datetime(_dig(payload, [("due_at",), ("due_date",), ("installment", "due_at")]))
-            days_until_due = _to_float(_dig(payload, [("days_until_due",)]), default=-1.0)
+            source_payload, plan = self._apply_emi_defaults(payload, force=False)
+            cutoff_at = _safe_iso_to_datetime(_dig(source_payload, [("cutoff_at",), ("cutoff_time",)]))
+            due_at = _safe_iso_to_datetime(
+                _dig(source_payload, [("due_at",), ("due_date",), ("installment", "due_at")])
+            )
+            days_until_due = _to_float(_dig(source_payload, [("days_until_due",)]), default=-1.0)
             if days_until_due < 0:
                 now = cutoff_at or datetime.now(timezone.utc)
                 if due_at is not None:
                     delta = due_at - now
                     days_until_due = max(0.0, delta.total_seconds() / 86400.0)
                 else:
-                    days_until_due = 2.0
+                    cadence = _to_float(_dig(source_payload, [("cadence_days",)]), default=0.0)
+                    if cadence <= 0 and plan is not None:
+                        cadence = float(plan.cadence_days)
+                    days_until_due = max(1.0, cadence if cadence > 0 else 2.0)
 
             plan_amount = _to_float(
-                _dig(payload, [("plan_amount",), ("plan_amount_inr",), ("loan", "plan_amount"), ("loan", "principal")]),
+                _dig(
+                    source_payload,
+                    [("plan_amount",), ("plan_amount_inr",), ("loan", "plan_amount"), ("loan", "principal")],
+                ),
                 default=0.0,
             )
-            tenure_days = _to_int(_dig(payload, [("tenure_days",), ("loan", "tenure_days")]), default=30)
+            tenure_days = _to_int(_dig(source_payload, [("tenure_days",), ("loan", "tenure_days")]), default=30)
             installment_amount = _to_float(
-                _dig(payload, [("installment_amount",), ("loan", "installment_amount")]),
+                _dig(source_payload, [("installment_amount",), ("loan", "installment_amount")]),
                 default=0.0,
             )
             if installment_amount <= 0:
-                installment_count = _to_int(_dig(payload, [("installment_count",), ("loan", "installment_count")]), default=0)
+                installment_count = _to_int(
+                    _dig(source_payload, [("installment_count",), ("loan", "installment_count")]),
+                    default=0,
+                )
                 if plan_amount > 0 and installment_count > 0:
                     installment_amount = plan_amount / max(installment_count, 1)
 
             current_safety_ratio = _to_float(
-                _dig(payload, [("current_safety_ratio",), ("safety_ratio",), ("health_factor",)]),
+                _dig(source_payload, [("current_safety_ratio",), ("safety_ratio",), ("health_factor",)]),
                 default=1.2,
             )
             distance_threshold = _to_float(
-                _dig(payload, [("distance_to_liquidation_threshold",)]),
+                _dig(source_payload, [("distance_to_liquidation_threshold",)]),
                 default=current_safety_ratio - 1.0,
             )
-            collateral_type = str(_dig(payload, [("collateral_type",)]) or "volatile").lower()
+            collateral_type = str(_dig(source_payload, [("collateral_type",)]) or "volatile").lower()
             collateral_volatility_bucket = str(
-                _dig(payload, [("collateral_volatility_bucket",)])
+                _dig(source_payload, [("collateral_volatility_bucket",)])
                 or ("low" if collateral_type == "stable" else "high")
             ).lower()
 
             normalized = DefaultPredictionInput(
-                user_id=_dig(payload, [("user_id",)]),
-                plan_id=_dig(payload, [("plan_id",), ("loan_id",)]),
-                installment_id=_dig(payload, [("installment_id",)]),
+                user_id=_dig(source_payload, [("user_id",)]),
+                plan_id=_dig(source_payload, [("plan_id",), ("loan_id",)]),
+                installment_id=_dig(source_payload, [("installment_id",)]),
                 cutoff_at=cutoff_at,
-                on_time_ratio=max(0.0, min(1.0, _to_float(_dig(payload, [("on_time_ratio",)]), default=0.75))),
+                on_time_ratio=max(0.0, min(1.0, _to_float(_dig(source_payload, [("on_time_ratio",)]), default=0.75))),
                 missed_count_90d=_to_int(
-                    _dig(payload, [("missed_count_90d",), ("missed_payment_count",)]),
+                    _dig(source_payload, [("missed_count_90d",), ("missed_payment_count",)]),
                     default=0,
                 ),
-                max_days_late_180d=max(0.0, _to_float(_dig(payload, [("max_days_late_180d",)]), default=0.0)),
+                max_days_late_180d=max(0.0, _to_float(_dig(source_payload, [("max_days_late_180d",)]), default=0.0)),
                 avg_days_late=max(
                     0.0,
                     _to_float(
-                        _dig(payload, [("avg_days_late",)]),
-                        default=_to_float(_dig(payload, [("avg_delay_hours",)]), default=0.0) / 24.0,
+                        _dig(source_payload, [("avg_days_late",)]),
+                        default=_to_float(_dig(source_payload, [("avg_delay_hours",)]), default=0.0) / 24.0,
                     ),
                 ),
-                days_since_last_late=max(0.0, _to_float(_dig(payload, [("days_since_last_late",)]), default=30.0)),
+                days_since_last_late=max(
+                    0.0,
+                    _to_float(_dig(source_payload, [("days_since_last_late",)]), default=30.0),
+                ),
                 consecutive_on_time_count=_to_int(
-                    _dig(payload, [("consecutive_on_time_count",)]),
+                    _dig(source_payload, [("consecutive_on_time_count",)]),
                     default=0,
                 ),
                 plan_amount=max(0.000001, plan_amount),
                 tenure_days=max(1, tenure_days),
                 installment_amount=max(0.000001, installment_amount),
-                installment_number=max(1, _to_int(_dig(payload, [("installment_number",)]), default=1)),
+                installment_number=max(1, _to_int(_dig(source_payload, [("installment_number",)]), default=1)),
                 days_until_due=max(0.0, days_until_due),
                 current_safety_ratio=max(0.000001, current_safety_ratio),
                 distance_to_liquidation_threshold=distance_threshold,
                 collateral_type=collateral_type,
                 collateral_volatility_bucket=collateral_volatility_bucket,
-                topup_count_30d=_to_int(_dig(payload, [("topup_count_30d",), ("topup_count_last_30d",)]), default=0),
-                topup_recency_days=max(0.0, _to_float(_dig(payload, [("topup_recency_days",)]), default=7.0)),
-                opened_app_last_7d=_to_bool_as_int(_dig(payload, [("opened_app_last_7d",)]), default=0),
-                clicked_pay_now_last_7d=_to_bool_as_int(_dig(payload, [("clicked_pay_now_last_7d",)]), default=0),
-                payment_attempt_failed_count=_to_int(
-                    _dig(payload, [("payment_attempt_failed_count",)]),
+                topup_count_30d=_to_int(
+                    _dig(source_payload, [("topup_count_30d",), ("topup_count_last_30d",)]),
                     default=0,
                 ),
-                wallet_age_days=max(0.0, _to_float(_dig(payload, [("wallet_age_days",)]), default=180.0)),
-                tx_count_30d=_to_int(_dig(payload, [("tx_count_30d",)]), default=0),
+                topup_recency_days=max(0.0, _to_float(_dig(source_payload, [("topup_recency_days",)]), default=7.0)),
+                opened_app_last_7d=_to_bool_as_int(_dig(source_payload, [("opened_app_last_7d",)]), default=0),
+                clicked_pay_now_last_7d=_to_bool_as_int(_dig(source_payload, [("clicked_pay_now_last_7d",)]), default=0),
+                payment_attempt_failed_count=_to_int(
+                    _dig(source_payload, [("payment_attempt_failed_count",)]),
+                    default=0,
+                ),
+                wallet_age_days=max(0.0, _to_float(_dig(source_payload, [("wallet_age_days",)]), default=180.0)),
+                tx_count_30d=_to_int(_dig(source_payload, [("tx_count_30d",)]), default=0),
                 stablecoin_balance_bucket=str(
-                    _dig(payload, [("stablecoin_balance_bucket",)])
+                    _dig(source_payload, [("stablecoin_balance_bucket",)])
                     or "medium"
                 ).lower(),
             )
@@ -454,36 +536,37 @@ class MlPayloadOrchestrator:
     def normalize_deposit_payload(self, payload: Dict[str, Any]) -> DepositRecommendationRequest:
         """Normalize raw payload into `DepositRecommendationRequest`."""
         try:
+            source_payload, _ = self._apply_emi_defaults(payload, force=False)
             normalized = DepositRecommendationRequest(
                 plan_amount_inr=max(
                     0.000001,
                     _to_float(
-                        _dig(payload, [("plan_amount_inr",), ("plan_amount",), ("loan", "plan_amount")]),
+                        _dig(source_payload, [("plan_amount_inr",), ("plan_amount",), ("loan", "plan_amount")]),
                         default=0.0,
                     ),
                 ),
-                tenure_days=max(1, _to_int(_dig(payload, [("tenure_days",), ("loan", "tenure_days")]), default=30)),
-                risk_tier=str(_dig(payload, [("risk_tier",), ("tier",)]) or "MEDIUM").upper(),
-                collateral_token=str(_dig(payload, [("collateral_token",), ("asset_symbol",)]) or "BNB").upper(),
-                collateral_type=str(_dig(payload, [("collateral_type",)]) or "volatile").lower(),
+                tenure_days=max(1, _to_int(_dig(source_payload, [("tenure_days",), ("loan", "tenure_days")]), default=30)),
+                risk_tier=str(_dig(source_payload, [("risk_tier",), ("tier",)]) or "MEDIUM").upper(),
+                collateral_token=str(_dig(source_payload, [("collateral_token",), ("asset_symbol",)]) or "BNB").upper(),
+                collateral_type=str(_dig(source_payload, [("collateral_type",)]) or "volatile").lower(),
                 locked_token=max(
                     0.0,
                     _to_float(
-                        _dig(payload, [("locked_token",), ("current_locked_token",), ("collateral", "locked_token")]),
+                        _dig(source_payload, [("locked_token",), ("current_locked_token",), ("collateral", "locked_token")]),
                         default=0.0,
                     ),
                 ),
                 price_inr=max(
                     0.000001,
                     _to_float(
-                        _dig(payload, [("price_inr",), ("oracle_price_inr",), ("collateral_price_inr",)]),
+                        _dig(source_payload, [("price_inr",), ("oracle_price_inr",), ("collateral_price_inr",)]),
                         default=0.0,
                     ),
                 ),
-                stress_drop_pct=_dig(payload, [("stress_drop_pct",)]),
-                fees_buffer_pct=_dig(payload, [("fees_buffer_pct",)]),
+                stress_drop_pct=_dig(source_payload, [("stress_drop_pct",)]),
+                fees_buffer_pct=_dig(source_payload, [("fees_buffer_pct",)]),
                 outstanding_debt_inr=_to_float(
-                    _dig(payload, [("outstanding_debt_inr",), ("outstanding_debt",), ("loan", "outstanding_debt")]),
+                    _dig(source_payload, [("outstanding_debt_inr",), ("outstanding_debt",), ("loan", "outstanding_debt")]),
                     default=0.0,
                 ),
             )
@@ -574,6 +657,87 @@ class MlPayloadOrchestrator:
             return result
         except Exception:
             logger.exception("ML deposit orchestration failed.")
+            raise
+
+    def evaluate_emi_plans(self, request_payload: MlEmiPlanEvaluationRequest) -> Dict[str, Any]:
+        """Evaluate risk/default/deposit outputs across EMI plans."""
+        try:
+            plans = self._resolve_emi_plans(request_payload.plan_ids)
+            if not plans:
+                raise ValueError("No EMI plans available for evaluation.")
+
+            evaluations: List[Dict[str, Any]] = []
+            success = True
+            for plan in plans:
+                merged_payload, _ = self._apply_emi_defaults(
+                    payload={
+                        **dict(request_payload.base_payload or {}),
+                        "emi_plan_id": plan.plan_id,
+                    },
+                    force=True,
+                )
+                plan_result: Dict[str, Any] = {
+                    "plan_id": plan.plan_id,
+                    "plan_name": plan.plan_name,
+                    "source_platform": plan.source_platform,
+                    "results": {},
+                    "errors": {},
+                }
+
+                if request_payload.run_risk:
+                    try:
+                        risk_result = self.score_risk(
+                            merged_payload,
+                            include_normalized_payload=request_payload.include_normalized_payload,
+                        )
+                        plan_result["results"]["risk"] = risk_result
+                        merged_payload["risk_tier"] = str(risk_result.get("risk_tier", "MEDIUM")).upper()
+                    except Exception as exc:
+                        success = False
+                        plan_result["errors"]["risk"] = str(exc)
+
+                if request_payload.run_default:
+                    try:
+                        default_result = self.predict_default(
+                            merged_payload,
+                            include_normalized_payload=request_payload.include_normalized_payload,
+                        )
+                        plan_result["results"]["default_prediction"] = default_result
+                    except Exception as exc:
+                        success = False
+                        plan_result["errors"]["default_prediction"] = str(exc)
+
+                if request_payload.run_policy_deposit:
+                    try:
+                        policy_result = self.recommend_deposit_policy(
+                            merged_payload,
+                            include_normalized_payload=request_payload.include_normalized_payload,
+                        )
+                        plan_result["results"]["deposit_policy"] = policy_result
+                    except Exception as exc:
+                        success = False
+                        plan_result["errors"]["deposit_policy"] = str(exc)
+
+                if request_payload.run_ml_deposit:
+                    try:
+                        ml_result = self.recommend_deposit_ml(
+                            merged_payload,
+                            include_normalized_payload=request_payload.include_normalized_payload,
+                        )
+                        plan_result["results"]["deposit_ml"] = ml_result
+                    except Exception as exc:
+                        success = False
+                        plan_result["errors"]["deposit_ml"] = str(exc)
+
+                evaluations.append(plan_result)
+
+            return {
+                "success": success,
+                "total_plans": len(evaluations),
+                "evaluations": evaluations,
+            }
+        except Exception:
+            logger.exception("EMI plan evaluation failed request=%s", request_payload.dict())
             raise
 
     def orchestrate(self, request_payload: MlOrchestrationRequest) -> Dict[str, Any]:

@@ -1,6 +1,6 @@
 """Schema definitions for ML orchestration endpoints."""
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, validator
 
@@ -57,3 +57,23 @@ class MlTrainingRowBuildRequest(BaseModel):
         if normalized not in _SUPPORTED_MODEL_TYPES:
             raise ValueError("model_type must be one of: risk, default, deposit")
         return normalized
+
+
+class MlEmiPlanEvaluationRequest(BaseModel):
+    """Request payload to evaluate ML outputs across all or selected EMI plans."""
+
+    base_payload: Dict[str, Any] = Field(default_factory=dict)
+    plan_ids: Optional[List[str]] = Field(default=None)
+    run_risk: bool = Field(default=True)
+    run_default: bool = Field(default=True)
+    run_policy_deposit: bool = Field(default=True)
+    run_ml_deposit: bool = Field(default=False)
+    include_normalized_payload: bool = Field(default=False)
+
+    @validator("plan_ids", pre=True, always=True)
+    def _normalize_plan_ids(cls, value: Optional[List[Any]]) -> Optional[List[str]]:
+        """Normalize optional list of plan identifiers."""
+        if value is None:
+            return None
+        normalized = [str(item).strip() for item in value if str(item).strip()]
+        return normalized or None

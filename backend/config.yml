@@ -49,12 +49,23 @@ ml:
   default_high_threshold: 0.60
   default_medium_threshold: 0.30
 
+emi:
+  plans_path: "D:\\projects\\Ping-Masters\\backend\\settings\\emi_plans.json"
+  default_plan_id: "bnpl_pay_in_4"
+
 market_api:
   provider: "cryptocompare"
   base_url: "https://min-api.cryptocompare.com"
   symbols_cache_ttl_sec: 1800
   api_key: ""
   api_key_header: "authorization"
+
+razorpay:
+  enabled: true
+  key_id: "rzp_test_REJ6UbWPqZ8yMn"
+  key_secret: "hS7wbtgUHpOV8eXJLoaWRN5"
+  api_base_url: "https://api.razorpay.com"
+  timeout_sec: 15
 
 contracts:
   bsc:

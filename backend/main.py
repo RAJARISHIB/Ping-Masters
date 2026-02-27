@@ -8,10 +8,12 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _BACKEND_DIR = Path(__file__).resolve().parent
+# Keep backend path first so local `backend/ml` package wins over repo-level `ml`.
+if str(_BACKEND_DIR) in sys.path:
+    sys.path.remove(str(_BACKEND_DIR))
+sys.path.insert(0, str(_BACKEND_DIR))
 if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-if str(_BACKEND_DIR) not in sys.path:
-    sys.path.insert(0, str(_BACKEND_DIR))
+    sys.path.append(str(_REPO_ROOT))
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
