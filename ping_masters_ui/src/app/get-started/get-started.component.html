@@ -69,6 +69,45 @@
       <div class="section">
         <div class="section-title">Notifications</div>
 
+        <div class="field">
+          <label class="label" for="currency">Select currency</label>
+          <div class="currency-picker" (focusout)="onCurrencyFocusOut($event)">
+            <input
+              class="input"
+              id="currency"
+              type="text"
+              [value]="currencyQuery()"
+              placeholder="Search currency (e.g. INR, US Dollar)"
+              autocomplete="off"
+              (focus)="onCurrencyFocus($event)"
+              (input)="onCurrencyInput($any($event.target).value)"
+            />
+
+            @if (currencyOpen()) {
+              <div class="currency-dropdown" role="listbox">
+                @if (filteredCurrencies().length === 0) {
+                  <div class="currency-empty">No currencies found.</div>
+                } @else {
+                  @for (currency of filteredCurrencies(); track currency.key) {
+                    <button
+                      type="button"
+                      class="currency-option"
+                      role="option"
+                      (mousedown)="$event.preventDefault(); selectCurrency(currency)"
+                    >
+                      <span class="currency-code">{{ currency.key }}</span>
+                      <span class="currency-name">{{ currency.value }}</span>
+                      @if (currency.symbol) {
+                        <span class="currency-symbol">{{ currency.symbol }}</span>
+                      }
+                    </button>
+                  }
+                }
+              </div>
+            }
+          </div>
+        </div>
+
         <div class="checkbox">
           <input id="notify-email" type="checkbox" formControlName="notifyEmail" />
           <label for="notify-email">Receive updates on Email</label>
@@ -115,4 +154,3 @@
     </form>
   </section>
 </div>
-

@@ -1,3 +1,4 @@
+import { provideHttpClient } from '@angular/common/http';
 import { ApplicationConfig, provideBrowserGlobalErrorListeners, provideZonelessChangeDetection } from '@angular/core';
 import { provideFirebaseApp } from '@angular/fire/app';
 import { provideAuth } from '@angular/fire/auth';
@@ -14,6 +15,7 @@ export const appConfig: ApplicationConfig = {
   providers: [
     provideBrowserGlobalErrorListeners(),
     provideZonelessChangeDetection(),
+    provideHttpClient(),
     provideRouter(routes),
     provideFirebaseApp(() => initializeApp(environment.firebase)),
     provideAuth(() => getAuth()),
