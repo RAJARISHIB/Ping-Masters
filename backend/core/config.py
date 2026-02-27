@@ -52,6 +52,17 @@ class AppSettings:
     liquidator_borrowers: list[str]
     currency_api_base_url: str
     currency_api_timeout_sec: int
+    ml_enabled: bool
+    ml_model_path: str
+    ml_deposit_model_path: str
+    ml_default_model_path: str
+    ml_default_high_threshold: float
+    ml_default_medium_threshold: float
+    market_api_base_url: str
+    market_api_provider: str
+    market_symbols_cache_ttl_sec: int
+    market_api_key: Optional[str]
+    market_api_key_header: str
 
 
 def _to_bool(value: Any, default: bool = False) -> bool:
@@ -184,6 +195,23 @@ def load_settings() -> AppSettings:
     currency_cfg = config.get("currency_api", {})
     currency_api_base_url = str(currency_cfg.get("base_url", "https://api.frankfurter.app"))
     currency_api_timeout_sec = _to_int(currency_cfg.get("timeout_sec", 10), 10)
+    ml_cfg = config.get("ml", {})
+    ml_enabled = _to_bool(ml_cfg.get("enabled", False), False)
+    ml_model_path = str(ml_cfg.get("model_path", "backend/ml/artifacts/risk_model.joblib"))
+    ml_deposit_model_path = str(
+        ml_cfg.get("deposit_model_path", "backend/ml/artifacts/deposit_recommendation_model.joblib")
+    )
+    ml_default_model_path = str(
+        ml_cfg.get("default_model_path", "backend/ml/artifacts/default_prediction_model.joblib")
+    )
+    ml_default_high_threshold = _to_float(ml_cfg.get("default_high_threshold", 0.60), 0.60)
+    ml_default_medium_threshold = _to_float(ml_cfg.get("default_medium_threshold", 0.30), 0.30)
+    market_cfg = config.get("market_api", {})
+    market_api_provider = str(market_cfg.get("provider", "cryptocompare")).lower()
+    market_api_base_url = str(market_cfg.get("base_url", "https://min-api.cryptocompare.com"))
+    market_symbols_cache_ttl_sec = _to_int(market_cfg.get("symbols_cache_ttl_sec", 1800), 1800)
+    market_api_key = market_cfg.get("api_key")
+    market_api_key_header = str(market_cfg.get("api_key_header", "authorization"))
 
     return AppSettings(
         app_name=app_name,
@@ -219,4 +247,15 @@ def load_settings() -> AppSettings:
         liquidator_borrowers=liquidator_borrowers,
         currency_api_base_url=currency_api_base_url,
         currency_api_timeout_sec=currency_api_timeout_sec,
+        ml_enabled=ml_enabled,
+        ml_model_path=ml_model_path,
+        ml_deposit_model_path=ml_deposit_model_path,
+        ml_default_model_path=ml_default_model_path,
+        ml_default_high_threshold=ml_default_high_threshold,
+        ml_default_medium_threshold=ml_default_medium_threshold,
+        market_api_base_url=market_api_base_url,
+        market_api_provider=market_api_provider,
+        market_symbols_cache_ttl_sec=market_symbols_cache_ttl_sec,
+        market_api_key=market_api_key,
+        market_api_key_header=market_api_key_header,
     )

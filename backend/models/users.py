@@ -1,5 +1,6 @@
 """User domain model for borrower profiles and behavior signals."""
 
+from datetime import datetime
 import logging
 from typing import List, Optional
 
@@ -36,6 +37,12 @@ class UserModel(BaseDocumentModel):
     on_time_payment_count: int = Field(default=0, ge=0)
     late_payment_count: int = Field(default=0, ge=0)
     top_up_count: int = Field(default=0, ge=0)
+    loan_currency: Optional[str] = Field(default=None, min_length=3, max_length=3)
+    total_borrowed_fiat: float = Field(default=0.0, ge=0.0)
+    total_repaid_fiat: float = Field(default=0.0, ge=0.0)
+    outstanding_debt_fiat: float = Field(default=0.0, ge=0.0)
+    last_loan_action: Optional[str] = Field(default=None)
+    last_loan_action_at: Optional[datetime] = Field(default=None)
 
     @validator("notification_channels", pre=True, always=True)
     def _normalize_channels(cls, value: List[str]) -> List[str]:
@@ -63,4 +70,15 @@ class UserModel(BaseDocumentModel):
             return value.upper()
         except Exception:
             logger.exception("Failed to normalize currency_code value=%s", value)
+            return value
+
+    @validator("loan_currency")
+    def _normalize_loan_currency(cls, value: Optional[str]) -> Optional[str]:
+        """Normalize loan currency to upper-case when present."""
+        if value is None:
+            return None
+        try:
+            return value.upper()
+        except Exception:
+            logger.exception("Failed to normalize loan_currency value=%s", value)
             return value

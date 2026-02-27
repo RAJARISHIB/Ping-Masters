@@ -4,12 +4,6 @@
 
 ---
 
-## Base URL
-
-```
-http://localhost:8000
-```
-
 ---
 
 ## Architecture Overview
@@ -612,11 +606,11 @@ Populated after deployment — see `contracts/deployments/`:
 
 | Contract | Network | Address |
 |----------|---------|---------|
-| PriceConsumer | BSC Testnet | TBD |
-| DebtToken (pmUSD) | BSC Testnet | TBD |
-| DebtToken (pmINR) | BSC Testnet | TBD |
+| PriceConsumer | BSC Testnet | 0xB224d6981F6E02Fb0A848f2366B406edbAd3B755 |
+| DebtToken (pmUSD) | BSC Testnet | 0x43cc472cA4fe4027aA583871fE8F7Bb683B82279 |
+| DebtToken (pmINR) | BSC Testnet | 0x55ff535cbf9Dc439Ea3D610097bfA8f1D0b0F332 |
 | LendingEngine | BSC Testnet | TBD |
-| LiquidationArchive | opBNB Testnet | TBD |
+| LiquidationArchive | opBNB Testnet | 0x937760A01819B6889453eaf8F03E5C3Cf7423278 |
 
 ---
 
@@ -628,3 +622,97 @@ Populated after deployment — see `contracts/deployments/`:
 | Debt (pmUSD / pmINR) | 1e18 per fiat unit | Divide by 1e18 |
 | Oracle price | 8 decimals | Divide by 1e8 |
 | Health factor | 1e18 = 1.0 | Divide by 1e18 |
+
+---
+
+## ML Operations API (Payload, Training, Runtime)
+
+### `GET /ml/payload-specs`
+Returns required and optional fields for:
+- `risk` score payload
+- `default` prediction payload
+- `deposit` recommendation payload
+
+### `POST /ml/payload-analyze`
+Checks payload completeness and normalization readiness before inference/training.
+
+Request:
+```json
+{
+  "model_type": "default",
+  "payload": {
+    "on_time_ratio": 0.82,
+    "missed_count_90d": 1
+  }
+}
+```
+
+### `POST /ml/payload-build-training-row`
+Builds a normalized training row from raw payload.
+
+Request:
+```json
+{
+  "model_type": "risk",
+  "payload": {
+    "plan_amount_inr": 5000,
+    "tenure_days": 60,
+    "installment_count": 4,
+    "outstanding_debt_inr": 4800,
+    "collateral_value_inr": 7200
+  },
+  "label": "MEDIUM"
+}
+```
+
+### `GET /ml/training/specs`
+Returns model feature columns, label columns, artifact paths, and default thresholds.
+
+### `POST /ml/training/generate-dataset`
+Generates synthetic dataset CSV for `risk` / `default` / `deposit`.
+
+Request:
+```json
+{
+  "model_type": "deposit",
+  "rows": 10000,
+  "seed": 42
+}
+```
+
+### `POST /ml/training/train`
+Trains selected model from provided dataset path or synthetic data.
+
+Request:
+```json
+{
+  "model_type": "default",
+  "data_path": "backend/ml/artifacts/default_training_data.csv",
+  "reload_after_train": true,
+  "high_threshold": 0.6,
+  "medium_threshold": 0.3
+}
+```
+
+### `POST /ml/runtime/reload`
+Reloads one or more model artifacts without restarting backend.
+
+Request:
+```json
+{
+  "reload_risk": true,
+  "reload_default": true,
+  "reload_deposit": true
+}
+```
+
+### `PATCH /ml/runtime/default-thresholds`
+Updates default prediction tier thresholds at runtime.
+
+Request:
+```json
+{
+  "high_threshold": 0.65,
+  "medium_threshold": 0.35
+}
+```

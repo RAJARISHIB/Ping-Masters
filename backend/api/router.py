@@ -1,17 +1,40 @@
 """Primary API router module with Firebase-backed endpoints."""
 
+from datetime import datetime, timezone
 import logging
 from typing import Optional, Union
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, ValidationError
+from web3 import Web3
 
 from common import convert_currency_amount
 from core import FirebaseClientManager, Web3ClientManager
 from core.config import AppSettings
+from ml.deposit_inference import DepositRecommendationInferenceService
+from ml.deposit_schema import DepositRecommendationRequest
+from ml.default_inference import DefaultPredictionInferenceService
+from ml.default_schema import DefaultPredictionInput
+from ml.inference import RiskModelInferenceService
+from ml.orchestration_schema import (
+    MlOrchestrationRequest,
+    MlPayloadAnalysisRequest,
+    MlTrainingRowBuildRequest,
+)
+from ml.orchestrator import MlPayloadOrchestrator
+from ml.schema import RiskFeatureInput
+from ml.training_manager import MlModelManagementService
+from ml.training_schema import (
+    MlGenerateDatasetRequest,
+    MlReloadModelsRequest,
+    MlTrainModelRequest,
+    MlUpdateDefaultThresholdRequest,
+)
 from models.exceptions import ModelNotFoundError, VersionConflictError
 from models.users import UserModel, WalletAddressModel
 from repositories.firestore_user_repository import FirestoreUserRepository
+from services import ProtocolApiService
+from services.market_data_service import MarketDataService
 
 
 logger = logging.getLogger(__name__)
@@ -27,6 +50,70 @@ class UserFromFirebaseCreateRequest(BaseModel):
     currency_symbol: str = Field(default="Rs", min_length=1, max_length=3)
     autopay_enabled: bool = Field(default=False)
     kyc_level: int = Field(default=0, ge=0, le=3)
+
+
+class OracleUpdatePricesRequest(BaseModel):
+    """Request payload for oracle price updates."""
+
+    usd_price: int = Field(..., gt=0)
+    inr_price: int = Field(..., gt=0)
+
+
+class UserSetCurrencyRequest(BaseModel):
+    """Request payload for setting wallet currency."""
+
+    wallet: str = Field(..., min_length=6)
+    currency: str = Field(..., min_length=3, max_length=3)
+
+
+class CollateralRequest(BaseModel):
+    """Request payload for collateral actions."""
+
+    wallet: str = Field(..., min_length=6)
+    amount_bnb: str = Field(..., min_length=1)
+
+
+class BorrowRequest(BaseModel):
+    """Request payload for borrow endpoint."""
+
+    wallet: str = Field(..., min_length=6)
+    amount: str = Field(..., min_length=1)
+    currency: Optional[str] = Field(default=None, min_length=3, max_length=3)
+
+
+class RepayRequest(BaseModel):
+    """Request payload for repay endpoint."""
+
+    wallet: str = Field(..., min_length=6)
+    amount: str = Field(..., min_length=1)
+
+
+class LiquidateRequest(BaseModel):
+    """Request payload for liquidation endpoint."""
+
+    wallet: str = Field(..., min_length=6)
+
+
+class MarketChartRequest(BaseModel):
+    """Request payload for market chart retrieval."""
+
+    symbol: str = Field(..., min_length=1)
+    timeframe: str = Field(..., min_length=2)
+    vs_currency: str = Field(default="usd", min_length=3)
+
+
+def _resolve_chain_rpc(settings: AppSettings, chain: str) -> str:
+    """Resolve RPC URL for supported chain names."""
+    normalized_chain = chain.strip().lower()
+    if normalized_chain == "bsc":
+        if not settings.bsc_rpc_url:
+            raise ValueError("BSC RPC URL is not configured.")
+        return settings.bsc_rpc_url
+    if normalized_chain == "opbnb":
+        if not settings.opbnb_rpc_url:
+            raise ValueError("opBNB RPC URL is not configured.")
+        return settings.opbnb_rpc_url
+    raise ValueError("Unsupported chain. Use 'bsc' or 'opbnb'.")
 
 
 def _require_user_repository(repository: Optional[FirestoreUserRepository]) -> FirestoreUserRepository:
@@ -62,6 +149,81 @@ def _extract_profile_fields(source_payload: dict, user_id: str) -> tuple[str, st
     return str(email), str(phone), str(full_name)
 
 
+def _safe_to_float(value: Optional[Union[str, float]]) -> float:
+    """Convert mixed numeric payload values into float safely."""
+    try:
+        if value is None:
+            return 0.0
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _sync_user_loan_state(
+    user_repository: Optional[FirestoreUserRepository],
+    wallet: str,
+    action: str,
+    result_payload: dict,
+) -> None:
+    """Upsert and update user loan-related fields after borrow/repay events."""
+    if user_repository is None:
+        return
+
+    action_normalized = action.strip().lower()
+    if action_normalized not in {"borrow", "repay"}:
+        logger.warning("Loan sync skipped for unknown action=%s wallet=%s", action, wallet)
+        return
+
+    currency = str(result_payload.get("currency") or "USD").upper()
+    borrowed = _safe_to_float(result_payload.get("borrowed"))
+    repaid = _safe_to_float(result_payload.get("repaid"))
+    remaining_debt = _safe_to_float(result_payload.get("remaining_debt"))
+
+    try:
+        try:
+            user = user_repository.get_by_id(wallet)
+            is_new_user = False
+        except ModelNotFoundError:
+            user = UserModel(
+                user_id=wallet,
+                email="{0}@wallet.local".format(wallet[:12]),
+                phone="0000000000",
+                full_name="Wallet User",
+                wallet_address=[WalletAddressModel(name="Primary", wallet_id=wallet)],
+                currency_code=currency,
+                currency_symbol="$" if currency == "USD" else "Rs",
+            )
+            is_new_user = True
+
+        user.loan_currency = currency
+        user.last_loan_action = action_normalized
+        user.last_loan_action_at = datetime.now(timezone.utc)
+
+        if action_normalized == "borrow":
+            user.total_borrowed_fiat += borrowed
+            if remaining_debt <= 0.0:
+                remaining_debt = user.outstanding_debt_fiat + borrowed
+        else:
+            user.total_repaid_fiat += repaid
+            if remaining_debt <= 0.0:
+                remaining_debt = max(0.0, user.outstanding_debt_fiat - repaid)
+
+        user.outstanding_debt_fiat = max(0.0, remaining_debt)
+
+        if is_new_user:
+            user_repository.create(user)
+        else:
+            user.version += 1
+            user_repository.update(user)
+    except Exception:
+        logger.exception(
+            "Failed syncing user loan state wallet=%s action=%s payload=%s",
+            wallet,
+            action_normalized,
+            result_payload,
+        )
+
+
 def build_router(settings: AppSettings) -> APIRouter:
     """Build and return the top-level API router.
 
@@ -72,10 +234,21 @@ def build_router(settings: AppSettings) -> APIRouter:
         APIRouter: Fully configured router with all endpoints.
     """
     router = APIRouter()
+    protocol_service = ProtocolApiService()
+    market_service = MarketDataService(
+        base_url=settings.market_api_base_url,
+        provider=settings.market_api_provider,
+        symbols_cache_ttl_sec=settings.market_symbols_cache_ttl_sec,
+        api_key=settings.market_api_key,
+        api_key_header=settings.market_api_key_header,
+    )
 
     firebase_manager: Optional[FirebaseClientManager] = None
     user_repository: Optional[FirestoreUserRepository] = None
     web3_manager: Optional[Web3ClientManager] = None
+    ml_inference: Optional[RiskModelInferenceService] = None
+    deposit_inference: Optional[DepositRecommendationInferenceService] = None
+    default_inference: Optional[DefaultPredictionInferenceService] = None
     if settings.firebase_enabled:
         try:
             firebase_manager = FirebaseClientManager(
@@ -115,6 +288,50 @@ def build_router(settings: AppSettings) -> APIRouter:
     else:
         logger.info("Web3 integration disabled by WEB3_ENABLED=false")
 
+    if settings.ml_enabled:
+        try:
+            ml_inference = RiskModelInferenceService(model_path=settings.ml_model_path)
+            if not ml_inference.is_loaded:
+                logger.warning("ML enabled but model could not be loaded path=%s", settings.ml_model_path)
+            deposit_inference = DepositRecommendationInferenceService(model_path=settings.ml_deposit_model_path)
+            if not deposit_inference.is_loaded:
+                logger.warning(
+                    "ML enabled but deposit model could not be loaded path=%s",
+                    settings.ml_deposit_model_path,
+                )
+            default_inference = DefaultPredictionInferenceService(
+                model_path=settings.ml_default_model_path,
+                high_threshold=settings.ml_default_high_threshold,
+                medium_threshold=settings.ml_default_medium_threshold,
+            )
+            if not default_inference.is_loaded:
+                logger.warning(
+                    "ML enabled but default model could not be loaded path=%s",
+                    settings.ml_default_model_path,
+                )
+        except Exception:
+            logger.exception("Failed to initialize ML inference service.")
+    else:
+        logger.info("ML integration disabled by ml.enabled=false")
+
+    ml_orchestrator = MlPayloadOrchestrator(
+        ml_enabled=settings.ml_enabled,
+        risk_inference=ml_inference,
+        default_inference=default_inference,
+        deposit_inference=deposit_inference,
+    )
+    ml_management_service = MlModelManagementService(
+        enabled=settings.ml_enabled,
+        risk_model_path=settings.ml_model_path,
+        default_model_path=settings.ml_default_model_path,
+        deposit_model_path=settings.ml_deposit_model_path,
+        default_high_threshold=settings.ml_default_high_threshold,
+        default_medium_threshold=settings.ml_default_medium_threshold,
+        risk_inference=ml_inference,
+        default_inference=default_inference,
+        deposit_inference=deposit_inference,
+    )
+
     router.include_router(build_firebase_router(firebase_manager))
     router.include_router(build_web3_router(web3_manager, settings.web3_read_function))
 
@@ -127,6 +344,101 @@ def build_router(settings: AppSettings) -> APIRouter:
     def health_check() -> dict:
         """Return service health status for probes and monitors."""
         return {"status": "ok"}
+
+    @router.get("/wallet/validate", summary="Validate wallet address format")
+    def wallet_validate(wallet: str) -> dict:
+        """Validate wallet address using EVM checksum/address rules."""
+        try:
+            normalized_wallet = wallet.strip()
+            is_valid = Web3.is_address(normalized_wallet)
+            checksum_address = Web3.to_checksum_address(normalized_wallet) if is_valid else None
+            return {
+                "wallet": normalized_wallet,
+                "is_valid": is_valid,
+                "checksum_address": checksum_address,
+            }
+        except Exception as exc:
+            logger.exception("Wallet validation failed wallet=%s", wallet)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.get("/wallet/balance", summary="Get native wallet balance")
+    def wallet_balance(wallet: str, chain: str = "bsc") -> dict:
+        """Fetch native balance (BNB) from public RPC for the given wallet."""
+        try:
+            normalized_wallet = wallet.strip()
+            if not Web3.is_address(normalized_wallet):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Invalid wallet address format.",
+                )
+            rpc_url = _resolve_chain_rpc(settings=settings, chain=chain)
+            provider = Web3(Web3.HTTPProvider(rpc_url))
+            if not provider.is_connected():
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Unable to connect to RPC provider.",
+                )
+            checksum_wallet = Web3.to_checksum_address(normalized_wallet)
+            balance_wei = provider.eth.get_balance(checksum_wallet)
+            balance_bnb = provider.from_wei(balance_wei, "ether")
+            return {
+                "wallet": checksum_wallet,
+                "chain": chain.lower(),
+                "balance_wei": str(balance_wei),
+                "balance_bnb": str(balance_bnb),
+            }
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        except Exception as exc:
+            logger.exception("Wallet balance lookup failed wallet=%s chain=%s", wallet, chain)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.post("/market/chart", summary="Get market chart by symbol and timeframe")
+    def market_chart(payload: MarketChartRequest) -> dict:
+        """Fetch real-time/historical chart data for user-selected crypto symbol."""
+        try:
+            return market_service.get_chart(
+                symbol_or_id=payload.symbol,
+                timeframe=payload.timeframe,
+                vs_currency=payload.vs_currency,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        except Exception as exc:
+            logger.exception("Market chart endpoint failed symbol=%s timeframe=%s", payload.symbol, payload.timeframe)
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+
+    @router.get("/market/symbols", summary="List all available crypto symbols")
+    def market_symbols(refresh: bool = False) -> dict:
+        """Return all symbols available from the configured market data provider."""
+        try:
+            symbols = market_service.list_all_symbols(refresh=refresh)
+            return {
+                "total": len(symbols),
+                "symbols": symbols,
+                "provider": settings.market_api_base_url,
+            }
+        except Exception as exc:
+            logger.exception("Market symbols endpoint failed.")
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+
+    @router.get("/market/resolve", summary="Resolve symbol to provider coin id")
+    def market_resolve(symbol: str) -> dict:
+        """Resolve user-provided symbol/id into normalized provider id."""
+        try:
+            coin_id = market_service.resolve_coin_id(symbol_or_id=symbol)
+            return {
+                "input": symbol,
+                "coin_id": coin_id,
+                "provider": settings.market_api_base_url,
+            }
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        except Exception as exc:
+            logger.exception("Market resolve endpoint failed symbol=%s", symbol)
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
     @router.get("/currency/convert", summary="Convert amount to target currency")
     def currency_convert(amount: float, from_currency: str, to_currency: str) -> dict:
@@ -162,7 +474,358 @@ def build_router(settings: AppSettings) -> APIRouter:
             "port": settings.port,
             "firebase_enabled": settings.firebase_enabled,
             "web3_enabled": settings.web3_enabled,
+            "ml_enabled": settings.ml_enabled,
         }
+
+    @router.get("/ml/health", summary="ML model health")
+    def ml_health() -> dict:
+        """Return ML inference model status."""
+        return {
+            "ml_enabled": settings.ml_enabled,
+            "model_loaded": bool(ml_inference and ml_inference.is_loaded),
+            "model_path": settings.ml_model_path,
+        }
+
+    @router.get("/ml/payload-specs", summary="List ML payload field specifications")
+    def ml_payload_specs() -> dict:
+        """Return required/optional payload fields used across ML endpoints."""
+        try:
+            return ml_orchestrator.get_payload_specs()
+        except Exception as exc:
+            logger.exception("ML payload specs endpoint failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.post("/ml/payload-analyze", summary="Analyze ML payload completeness")
+    def ml_payload_analyze(payload: MlPayloadAnalysisRequest) -> dict:
+        """Analyze user payload for selected ML model before inference/training."""
+        try:
+            return ml_orchestrator.analyze_payload(model_type=payload.model_type, payload=payload.payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        except Exception as exc:
+            logger.exception("ML payload analyze endpoint failed model_type=%s", payload.model_type)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.post("/ml/payload-build-training-row", summary="Build normalized ML training row")
+    def ml_payload_build_training_row(payload: MlTrainingRowBuildRequest) -> dict:
+        """Build normalized training row from raw payload and optional label."""
+        try:
+            row = ml_orchestrator.build_training_row(
+                model_type=payload.model_type,
+                payload=payload.payload,
+                label=payload.label,
+            )
+            return {"model_type": payload.model_type, "row": row}
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        except Exception as exc:
+            logger.exception("ML training-row build endpoint failed model_type=%s", payload.model_type)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.get("/ml/runtime/status", summary="ML runtime status")
+    def ml_runtime_status() -> dict:
+        """Return runtime model state, loaded flags, and thresholds."""
+        try:
+            return ml_management_service.get_runtime_status()
+        except Exception as exc:
+            logger.exception("ML runtime status endpoint failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.get("/ml/training/specs", summary="ML training requirements")
+    def ml_training_specs() -> dict:
+        """Return model features, labels, and training artifact paths."""
+        try:
+            return ml_management_service.get_training_specs()
+        except Exception as exc:
+            logger.exception("ML training specs endpoint failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.post("/ml/training/generate-dataset", summary="Generate synthetic ML dataset")
+    def ml_generate_dataset(payload: MlGenerateDatasetRequest) -> dict:
+        """Generate synthetic dataset for risk/default/deposit model training."""
+        try:
+            return ml_management_service.generate_dataset(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        except Exception as exc:
+            logger.exception("ML generate dataset endpoint failed model_type=%s", payload.model_type)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.post("/ml/training/train", summary="Train ML model")
+    def ml_train_model(payload: MlTrainModelRequest) -> dict:
+        """Train selected ML model and optionally reload runtime artifact."""
+        try:
+            return ml_management_service.train_model(payload)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        except Exception as exc:
+            logger.exception("ML train endpoint failed model_type=%s", payload.model_type)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.post("/ml/runtime/reload", summary="Reload ML model artifacts")
+    def ml_runtime_reload(payload: MlReloadModelsRequest) -> dict:
+        """Reload one or more ML artifacts in runtime inference services."""
+        try:
+            return ml_management_service.reload_models(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        except Exception as exc:
+            logger.exception("ML runtime reload endpoint failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.patch("/ml/runtime/default-thresholds", summary="Update default model thresholds")
+    def ml_update_default_thresholds(payload: MlUpdateDefaultThresholdRequest) -> dict:
+        """Update HIGH/MEDIUM thresholds used by default prediction actions."""
+        try:
+            return ml_management_service.update_default_thresholds(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        except Exception as exc:
+            logger.exception("ML threshold update endpoint failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.post("/ml/score", summary="Infer risk tier from feature payload")
+    def ml_score(payload: RiskFeatureInput) -> dict:
+        """Run risk-tier inference using trained model artifact."""
+        try:
+            return ml_orchestrator.score_risk(payload)
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+        except Exception as exc:
+            logger.exception("ML score endpoint failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.post("/risk/recommend-deposit", summary="Rule-based deposit recommendation")
+    def risk_recommend_deposit(payload: DepositRecommendationRequest) -> dict:
+        """Recommend required deposit using deterministic policy."""
+        try:
+            return ml_orchestrator.recommend_deposit_policy(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        except Exception as exc:
+            logger.exception("Policy deposit recommendation failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.get("/ml/deposit-health", summary="Deposit model health")
+    def ml_deposit_health() -> dict:
+        """Return deposit model availability status."""
+        return {
+            "ml_enabled": settings.ml_enabled,
+            "deposit_model_loaded": bool(deposit_inference and deposit_inference.is_loaded),
+            "deposit_model_path": settings.ml_deposit_model_path,
+        }
+
+    @router.get("/ml/default-health", summary="Default prediction model health")
+    def ml_default_health() -> dict:
+        """Return default prediction model status."""
+        return {
+            "ml_enabled": settings.ml_enabled,
+            "default_model_loaded": bool(default_inference and default_inference.is_loaded),
+            "default_model_path": settings.ml_default_model_path,
+            "high_threshold": settings.ml_default_high_threshold,
+            "medium_threshold": settings.ml_default_medium_threshold,
+        }
+
+    @router.post("/ml/predict-default", summary="Predict missed next installment probability")
+    def ml_predict_default(payload: DefaultPredictionInput) -> dict:
+        """Predict next-installment default probability and recommended actions."""
+        try:
+            return ml_orchestrator.predict_default(payload)
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+        except Exception as exc:
+            logger.exception("Default prediction endpoint failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.post("/ml/recommend-deposit", summary="ML deposit recommendation with fallback")
+    def ml_recommend_deposit(payload: DepositRecommendationRequest) -> dict:
+        """Recommend deposit using ML model; falls back to policy if model unavailable."""
+        try:
+            return ml_orchestrator.recommend_deposit_ml(payload)
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+        except Exception as exc:
+            logger.exception("ML deposit recommendation endpoint failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.post("/ml/orchestrate", summary="Run multi-model ML orchestration")
+    def ml_orchestrate(payload: MlOrchestrationRequest) -> dict:
+        """Run combined ML flows from one request payload."""
+        try:
+            return ml_orchestrator.orchestrate(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+        except Exception as exc:
+            logger.exception("ML orchestration endpoint failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.post("/oracle/update-prices", summary="Update oracle prices")
+    def oracle_update_prices(payload: OracleUpdatePricesRequest) -> dict:
+        """Update BNB/USD and BNB/INR prices."""
+        try:
+            return protocol_service.update_prices(payload.usd_price, payload.inr_price)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        except Exception as exc:
+            logger.exception("Oracle update failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.get("/oracle/prices", summary="Get oracle prices")
+    def oracle_prices() -> dict:
+        """Get currently tracked oracle prices."""
+        try:
+            return protocol_service.get_prices()
+        except Exception as exc:
+            logger.exception("Oracle price read failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.post("/users/set-currency", summary="Set currency preference")
+    def users_set_currency(payload: UserSetCurrencyRequest) -> dict:
+        """Set wallet currency preference."""
+        try:
+            return protocol_service.set_currency(payload.wallet, payload.currency)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+        except Exception as exc:
+            logger.exception("Set currency failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.post("/collateral/deposit", summary="Deposit collateral")
+    def collateral_deposit(payload: CollateralRequest) -> dict:
+        """Deposit BNB collateral."""
+        try:
+            return protocol_service.deposit_collateral(payload.wallet, payload.amount_bnb)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        except Exception as exc:
+            logger.exception("Collateral deposit failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.post("/collateral/withdraw", summary="Withdraw collateral")
+    def collateral_withdraw(payload: CollateralRequest) -> dict:
+        """Withdraw BNB collateral."""
+        try:
+            return protocol_service.withdraw_collateral(payload.wallet, payload.amount_bnb)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        except Exception as exc:
+            logger.exception("Collateral withdraw failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.post("/borrow", summary="Borrow debt token")
+    def borrow(payload: BorrowRequest) -> dict:
+        """Borrow using collateral and selected currency."""
+        try:
+            result = protocol_service.borrow(payload.wallet, payload.amount, payload.currency)
+            _sync_user_loan_state(
+                user_repository=user_repository,
+                wallet=payload.wallet,
+                action="borrow",
+                result_payload=result,
+            )
+            return result
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+        except Exception as exc:
+            logger.exception("Borrow failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.post("/repay", summary="Repay debt")
+    def repay(payload: RepayRequest) -> dict:
+        """Repay outstanding debt."""
+        try:
+            result = protocol_service.repay(payload.wallet, payload.amount)
+            _sync_user_loan_state(
+                user_repository=user_repository,
+                wallet=payload.wallet,
+                action="repay",
+                result_payload=result,
+            )
+            return result
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        except Exception as exc:
+            logger.exception("Repay failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.get("/account/{wallet}", summary="Get account status")
+    def account_status(wallet: str) -> dict:
+        """Get account status by wallet."""
+        try:
+            return protocol_service.account(wallet)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+        except Exception as exc:
+            logger.exception("Account status read failed wallet=%s", wallet)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.get("/positions/all", summary="Get all positions")
+    def positions_all(liquidatable_only: bool = False) -> dict:
+        """Get all tracked positions with optional liquidatable filter."""
+        try:
+            return protocol_service.all_positions(liquidatable_only=liquidatable_only)
+        except Exception as exc:
+            logger.exception("All positions read failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.post("/liquidate", summary="Liquidate position")
+    def liquidate(payload: LiquidateRequest) -> dict:
+        """Liquidate an unhealthy position and archive event."""
+        try:
+            return protocol_service.liquidate(payload.wallet)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        except Exception as exc:
+            logger.exception("Liquidation failed wallet=%s", payload.wallet)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.get("/archive/liquidations", summary="Get liquidation archive")
+    def archive_liquidations(page: int = 0, page_size: int = 20, currency: Optional[str] = None) -> dict:
+        """Get paginated liquidation archive."""
+        try:
+            if page < 0:
+                raise ValueError("page must be >= 0")
+            if page_size <= 0 or page_size > 100:
+                raise ValueError("page_size must be between 1 and 100")
+            return protocol_service.archive_liquidations(page=page, page_size=page_size, currency=currency)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        except Exception as exc:
+            logger.exception("Archive query failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.get("/stats", summary="Get global stats")
+    def stats() -> dict:
+        """Get global protocol stats."""
+        try:
+            return protocol_service.stats()
+        except Exception as exc:
+            logger.exception("Stats read failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
 
     @router.post("/users", summary="Create user", response_model=UserModel, status_code=status.HTTP_201_CREATED)
     def create_user(payload: UserModel) -> UserModel:

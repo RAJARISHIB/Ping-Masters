@@ -16,8 +16,8 @@ web3:
   bsc_rpc_url: "https://data-seed-prebsc-1-s1.binance.org:8545/"
   opbnb_rpc_url: "https://opbnb-testnet-rpc.bnbchain.org"
   contract_abi_json: []
-  bsc_contract_address: ""
-  opbnb_contract_address: ""
+  bsc_contract_address: "0xB224d6981F6E02Fb0A848f2366B406edbAd3B755"
+  opbnb_contract_address: "0x937760A01819B6889453eaf8F03E5C3Cf7423278"
   read_function: "getValue"
 
 liquidator:
@@ -40,3 +40,27 @@ liquidator:
 currency_api:
   base_url: "https://api.frankfurter.app"
   timeout_sec: 10
+
+ml:
+  enabled: true
+  model_path: "backend/ml/artifacts/risk_model.joblib"
+  deposit_model_path: "backend/ml/artifacts/deposit_recommendation_model.joblib"
+  default_model_path: "backend/ml/artifacts/default_prediction_model.joblib"
+  default_high_threshold: 0.60
+  default_medium_threshold: 0.30
+
+market_api:
+  provider: "cryptocompare"
+  base_url: "https://min-api.cryptocompare.com"
+  symbols_cache_ttl_sec: 1800
+  api_key: ""
+  api_key_header: "authorization"
+
+contracts:
+  bsc:
+    price_consumer: "0xB224d6981F6E02Fb0A848f2366B406edbAd3B755"
+    pm_usd: "0x43cc472cA4fe4027aA583871fE8F7Bb683B82279"
+    pm_inr: "0x55ff535cbf9Dc439Ea3D610097bfA8f1D0b0F332"
+    lending_engine: "TBD"
+  opbnb:
+    liquidation_archive: "0x937760A01819B6889453eaf8F03E5C3Cf7423278"

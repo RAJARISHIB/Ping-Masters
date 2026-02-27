@@ -6,3 +6,7 @@ pydantic
 google-cloud-firestore
 web3
 PyYAML
+numpy
+pandas
+scikit-learn
+joblib
