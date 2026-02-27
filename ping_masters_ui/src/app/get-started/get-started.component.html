@@ -1,0 +1,118 @@
+<div class="get-started-page">
+  <section class="card" role="main" aria-labelledby="title">
+    <header class="header">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">PM</div>
+        <div class="brand-name">Ping Masters</div>
+      </div>
+
+      <h1 id="title" class="title">Get started</h1>
+      <p class="subtitle">
+        Add at least one wallet. You can add more wallets anytime.
+      </p>
+    </header>
+
+    <form class="form" [formGroup]="form" (ngSubmit)="submit()">
+      <div class="section">
+        <div class="section-title">Wallet details</div>
+
+        <div class="wallets" formArrayName="wallet_address">
+          @for (wallet of wallets.controls; track wallet; let i = $index) {
+            <div class="wallet-row" [formGroupName]="i">
+              <div class="field">
+                <label class="label" [for]="'wallet-name-' + i">Wallet name</label>
+                <input
+                  class="input"
+                  [id]="'wallet-name-' + i"
+                  type="text"
+                  formControlName="name"
+                  placeholder="Metamask"
+                  autocomplete="off"
+                />
+                @if (wallet.get('name')?.touched && wallet.get('name')?.hasError('required')) {
+                  <div class="hint error">Wallet name is required.</div>
+                }
+              </div>
+
+              <div class="field">
+                <label class="label" [for]="'wallet-id-' + i">Wallet ID</label>
+                <input
+                  class="input"
+                  [id]="'wallet-id-' + i"
+                  type="text"
+                  formControlName="wallet_id"
+                  placeholder="0xabc123..."
+                  autocomplete="off"
+                />
+                @if (wallet.get('wallet_id')?.touched && wallet.get('wallet_id')?.hasError('required')) {
+                  <div class="hint error">Wallet ID is required.</div>
+                }
+              </div>
+
+              <button
+                class="icon-btn"
+                type="button"
+                (click)="removeWallet(i)"
+                [disabled]="wallets.length <= 1"
+                [attr.aria-label]="'Remove wallet ' + (i + 1)"
+                title="Remove wallet"
+              >
+                ×
+              </button>
+            </div>
+          }
+        </div>
+
+        <button class="link-btn" type="button" (click)="addWallet()">+ Add another wallet</button>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Notifications</div>
+
+        <div class="checkbox">
+          <input id="notify-email" type="checkbox" formControlName="notifyEmail" />
+          <label for="notify-email">Receive updates on Email</label>
+        </div>
+
+        <div class="checkbox">
+          <input id="notify-whatsapp" type="checkbox" formControlName="notifyWhatsapp" />
+          <label for="notify-whatsapp">Receive updates on WhatsApp</label>
+        </div>
+
+        <div class="field">
+          <label class="label" for="mobile">Mobile number</label>
+          <input
+            class="input"
+            id="mobile"
+            type="tel"
+            formControlName="mobile_number"
+            placeholder="e.g. 9876543210"
+            autocomplete="tel"
+          />
+
+          @if (form.controls.mobile_number.touched && form.controls.mobile_number.hasError('required')) {
+            <div class="hint error">Mobile number is required for WhatsApp updates.</div>
+          } @else if (form.controls.mobile_number.touched && form.controls.mobile_number.hasError('pattern')) {
+            <div class="hint error">Enter a valid mobile number.</div>
+          } @else if (!form.controls.notifyWhatsapp.value) {
+            <div class="hint">Optional unless WhatsApp updates are enabled.</div>
+          }
+        </div>
+      </div>
+
+      @if (error(); as message) {
+        <div class="error-banner" role="alert">{{ message }}</div>
+      }
+
+      <button class="btn primary" type="submit" [disabled]="form.invalid || saving()">
+        <span>Get started</span>
+        @if (saving()) {
+          <span class="spinner" aria-hidden="true"></span>
+        }
+      </button>
+
+      <a class="back-link" routerLink="/login">Back to login</a>
+    </form>
+  </section>
+</div>
+

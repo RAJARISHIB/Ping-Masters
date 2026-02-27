@@ -26,6 +26,8 @@ class UserModel(BaseDocumentModel):
     email: str = Field(..., min_length=5)
     phone: str = Field(..., min_length=8)
     full_name: str = Field(..., min_length=2)
+    currency_code: str = Field(default="INR", min_length=3, max_length=3)
+    currency_symbol: str = Field(default="Rs", min_length=1, max_length=3)
     autopay_enabled: bool = Field(default=False)
     notification_channels: List[str] = Field(default_factory=list)
     status: UserStatus = Field(default=UserStatus.ACTIVE)
@@ -53,3 +55,12 @@ class UserModel(BaseDocumentModel):
         except Exception:
             logger.exception("Failed to normalize wallet_address payload.")
             return []
+
+    @validator("currency_code")
+    def _normalize_currency_code(cls, value: str) -> str:
+        """Normalize currency code to upper-case ISO style."""
+        try:
+            return value.upper()
+        except Exception:
+            logger.exception("Failed to normalize currency_code value=%s", value)
+            return value

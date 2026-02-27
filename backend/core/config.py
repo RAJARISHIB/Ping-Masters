@@ -1,23 +1,23 @@
-"""Configuration loading utilities for environment-based settings."""
+"""Configuration loading utilities for YAML-based application settings."""
 
 from dataclasses import dataclass
-import os
+import json
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from dotenv import load_dotenv
+import yaml
 
 from .logging_config import get_logger
 
 
 logger = get_logger(__name__)
 _BASE_DIR = Path(__file__).resolve().parent.parent
-_ENV_PATH = _BASE_DIR / ".env"
+_CONFIG_PATH = _BASE_DIR / "config.yml"
 
 
 @dataclass(frozen=True)
 class AppSettings:
-    """Application settings loaded from environment variables."""
+    """Application settings loaded from YAML configuration file."""
 
     app_name: str
     debug: bool
@@ -35,19 +35,38 @@ class AppSettings:
     bsc_contract_address: Optional[str]
     opbnb_contract_address: Optional[str]
     web3_read_function: str
+    liquidator_enabled: bool
+    liquidator_rpc_url: Optional[str]
+    liquidator_contract_address: Optional[str]
+    liquidator_contract_abi_json: Optional[str]
+    liquidator_private_key: Optional[str]
+    liquidator_address: Optional[str]
+    liquidator_poll_interval_sec: int
+    liquidator_health_threshold: float
+    liquidator_chain_id: int
+    liquidator_gas_limit: int
+    liquidator_gas_price_gwei: int
+    liquidator_price_function: str
+    liquidator_health_function: str
+    liquidator_execute_function: str
+    liquidator_borrowers: list[str]
+    currency_api_base_url: str
+    currency_api_timeout_sec: int
 
 
-def _to_bool(value: str, default: bool = False) -> bool:
-    """Convert string value to bool with a default fallback."""
+def _to_bool(value: Any, default: bool = False) -> bool:
+    """Convert value to bool with a default fallback."""
     try:
+        if isinstance(value, bool):
+            return value
         return value.strip().lower() in {"1", "true", "yes", "on"}
     except (AttributeError, ValueError):
         logger.warning("Invalid boolean value '%s'. Using default=%s", value, default)
         return default
 
 
-def _to_int(value: str, default: int) -> int:
-    """Convert string value to int with a default fallback."""
+def _to_int(value: Any, default: int) -> int:
+    """Convert value to int with a default fallback."""
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -55,42 +74,116 @@ def _to_int(value: str, default: int) -> int:
         return default
 
 
-def get_env(key: str, default: Optional[str] = None) -> Optional[str]:
-    """Return an environment variable value by key."""
+def _to_float(value: Any, default: float) -> float:
+    """Convert value to float with a default fallback."""
     try:
-        value = os.getenv(key, default)
+        return float(value)
+    except (TypeError, ValueError):
+        logger.warning("Invalid float value '%s'. Using default=%s", value, default)
+        return default
+
+
+def _to_list(value: Any) -> list[str]:
+    """Convert list-like or comma-separated value to list[str]."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [item.strip() for item in str(value).split(",") if item.strip()]
+
+
+def _to_json_string(value: Any, default: str = "[]") -> str:
+    """Convert value into JSON string for ABI compatibility."""
+    try:
         if value is None:
-            logger.debug("Environment key '%s' not found and no default provided.", key)
-        return value
+            return default
+        if isinstance(value, str):
+            return value
+        return json.dumps(value)
     except Exception:
-        logger.exception("Failed to read environment key '%s'.", key)
+        logger.exception("Failed to serialize value as JSON string.")
+        return default
+
+
+def _read_config() -> dict:
+    """Read and parse YAML configuration."""
+    try:
+        with _CONFIG_PATH.open("r", encoding="utf-8") as config_file:
+            config_data = yaml.safe_load(config_file) or {}
+        logger.info("Configuration loaded from %s", _CONFIG_PATH)
+        return config_data
+    except FileNotFoundError:
+        logger.warning("Config file not found at %s. Falling back to defaults.", _CONFIG_PATH)
+        return {}
+    except Exception:
+        logger.exception("Failed to load config file from %s", _CONFIG_PATH)
+        return {}
+
+def get_env(key: str, default: Optional[str] = None) -> Optional[str]:
+    """Backward-compatible config reader using dot-notation keys."""
+    try:
+        data = _read_config()
+        current: Any = data
+        for part in key.split("."):
+            if not isinstance(current, dict) or part not in current:
+                return default
+            current = current[part]
+        if current is None:
+            return default
+        return str(current)
+    except Exception:
+        logger.exception("Failed to read config key '%s'.", key)
         return default
 
 
 def load_settings() -> AppSettings:
-    """Load and validate application settings from `.env` and process env."""
-    try:
-        load_dotenv(dotenv_path=_ENV_PATH)
-        logger.info("Environment loaded from %s", _ENV_PATH)
-    except Exception:
-        logger.exception("Failed to load .env file from %s", _ENV_PATH)
+    """Load and validate application settings from `config.yml`."""
+    config = _read_config()
+    app_cfg = config.get("app", {})
+    firebase_cfg = config.get("firebase", {})
+    web3_cfg = config.get("web3", {})
+    liquidator_cfg = config.get("liquidator", {})
 
-    app_name = get_env("APP_NAME", "Ping Masters API") or "Ping Masters API"
-    debug = _to_bool(get_env("DEBUG", "false") or "false")
-    host = get_env("HOST", "127.0.0.1") or "127.0.0.1"
-    port = _to_int(get_env("PORT", "8000"), 8000)
-    firebase_enabled = _to_bool(get_env("FIREBASE_ENABLED", "false") or "false")
-    firebase_project_id = get_env("FIREBASE_PROJECT_ID", None)
-    firebase_credentials_path = get_env("FIREBASE_CREDENTIALS_PATH", None)
-    firebase_users_collection = get_env("FIREBASE_USERS_COLLECTION", "users") or "users"
-    firebase_profile_collection = get_env("FIREBASE_PROFILE_COLLECTION", "firebase_users") or "firebase_users"
-    web3_enabled = _to_bool(get_env("WEB3_ENABLED", "false") or "false")
-    bsc_rpc_url = get_env("BSC_RPC_URL", None)
-    opbnb_rpc_url = get_env("OPBNB_RPC_URL", None)
-    contract_abi_json = get_env("CONTRACT_ABI_JSON", None)
-    bsc_contract_address = get_env("BSC_CONTRACT_ADDRESS", None)
-    opbnb_contract_address = get_env("OPBNB_CONTRACT_ADDRESS", None)
-    web3_read_function = get_env("WEB3_READ_FUNCTION", "getValue") or "getValue"
+    app_name = str(app_cfg.get("name", "Ping Masters API"))
+    debug = _to_bool(app_cfg.get("debug", False), False)
+    host = str(app_cfg.get("host", "127.0.0.1"))
+    port = _to_int(app_cfg.get("port", 8000), 8000)
+
+    firebase_enabled = _to_bool(firebase_cfg.get("enabled", False), False)
+    firebase_project_id = firebase_cfg.get("project_id")
+    firebase_credentials_path = firebase_cfg.get("credentials_path")
+    firebase_users_collection = str(firebase_cfg.get("users_collection", "users"))
+    firebase_profile_collection = str(firebase_cfg.get("profile_collection", "firebase_users"))
+
+    web3_enabled = _to_bool(web3_cfg.get("enabled", False), False)
+    bsc_rpc_url = web3_cfg.get("bsc_rpc_url")
+    opbnb_rpc_url = web3_cfg.get("opbnb_rpc_url")
+    contract_abi_json = _to_json_string(web3_cfg.get("contract_abi_json"), default="[]")
+    bsc_contract_address = web3_cfg.get("bsc_contract_address")
+    opbnb_contract_address = web3_cfg.get("opbnb_contract_address")
+    web3_read_function = str(web3_cfg.get("read_function", "getValue"))
+
+    liquidator_enabled = _to_bool(liquidator_cfg.get("enabled", False), False)
+    liquidator_rpc_url = liquidator_cfg.get("rpc_url", bsc_rpc_url)
+    liquidator_contract_address = liquidator_cfg.get("contract_address", bsc_contract_address)
+    liquidator_contract_abi_json = _to_json_string(
+        liquidator_cfg.get("contract_abi_json", contract_abi_json),
+        default="[]",
+    )
+    liquidator_private_key = liquidator_cfg.get("private_key")
+    liquidator_address = liquidator_cfg.get("address")
+    liquidator_poll_interval_sec = _to_int(liquidator_cfg.get("poll_interval_sec", 10), 10)
+    liquidator_health_threshold = _to_float(liquidator_cfg.get("health_threshold", 1.0), 1.0)
+    liquidator_chain_id = _to_int(liquidator_cfg.get("chain_id", 97), 97)
+    liquidator_gas_limit = _to_int(liquidator_cfg.get("gas_limit", 2000000), 2000000)
+    liquidator_gas_price_gwei = _to_int(liquidator_cfg.get("gas_price_gwei", 10), 10)
+    liquidator_price_function = str(liquidator_cfg.get("price_function", "getBNBPrice"))
+    liquidator_health_function = str(liquidator_cfg.get("health_function", "getHealthFactor"))
+    liquidator_execute_function = str(liquidator_cfg.get("execute_function", "liquidate"))
+    liquidator_borrowers = _to_list(liquidator_cfg.get("borrowers", []))
+    currency_cfg = config.get("currency_api", {})
+    currency_api_base_url = str(currency_cfg.get("base_url", "https://api.frankfurter.app"))
+    currency_api_timeout_sec = _to_int(currency_cfg.get("timeout_sec", 10), 10)
 
     return AppSettings(
         app_name=app_name,
@@ -109,4 +202,21 @@ def load_settings() -> AppSettings:
         bsc_contract_address=bsc_contract_address,
         opbnb_contract_address=opbnb_contract_address,
         web3_read_function=web3_read_function,
+        liquidator_enabled=liquidator_enabled,
+        liquidator_rpc_url=liquidator_rpc_url,
+        liquidator_contract_address=liquidator_contract_address,
+        liquidator_contract_abi_json=liquidator_contract_abi_json,
+        liquidator_private_key=liquidator_private_key,
+        liquidator_address=liquidator_address,
+        liquidator_poll_interval_sec=liquidator_poll_interval_sec,
+        liquidator_health_threshold=liquidator_health_threshold,
+        liquidator_chain_id=liquidator_chain_id,
+        liquidator_gas_limit=liquidator_gas_limit,
+        liquidator_gas_price_gwei=liquidator_gas_price_gwei,
+        liquidator_price_function=liquidator_price_function,
+        liquidator_health_function=liquidator_health_function,
+        liquidator_execute_function=liquidator_execute_function,
+        liquidator_borrowers=liquidator_borrowers,
+        currency_api_base_url=currency_api_base_url,
+        currency_api_timeout_sec=currency_api_timeout_sec,
     )
