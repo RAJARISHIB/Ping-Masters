@@ -209,7 +209,8 @@ These endpoints are backend simulation wrappers for contract-like behaviors.
 
 ### 3.2 Web3 utility and contract read APIs (`backend/api/router.py`)
 
-These endpoints validate addresses, read wallet balances from RPC, and call a configured contract read function on BSC/opBNB.
+These endpoints validate addresses, read wallet balances from RPC, call contract read functions,
+and now expose **wallet account snapshot + event transaction history** from Solidity events.
 
 #### `GET /wallet/validate`
 - Why used:
@@ -254,6 +255,75 @@ These endpoints validate addresses, read wallet balances from RPC, and call a co
   - No payload.
 - Response schema:
   - Same as `/get-data`.
+
+#### `GET /web3/account/{wallet}`
+- Why used:
+  - Returns one Solidity-focused account snapshot for a wallet:
+    - native chain balance,
+    - collateral,
+    - current debt,
+    - **remaining amount to be paid**.
+  - Reads `getAccountStatus(address)` when available, otherwise falls back to mapping getters
+    (`collateralAmount`, `borrowedAmount`, `userCurrency`, `hasCurrency`).
+- Request schema:
+  - Path: `wallet: str`
+  - Query: `chain: str = "bsc"` (`bsc` or `opbnb`)
+- Response schema:
+  - `wallet: str`
+  - `chain: str`
+  - `contract_address: str`
+  - `native_balance_wei: str`
+  - `native_balance_bnb: str`
+  - `account_state: {`
+    - `source: "getAccountStatus" | "mapping_getters" | null`
+    - `collateral_wei: Optional[str]`
+    - `collateral_bnb: Optional[str]`
+    - `collateral_fiat_18: Optional[str]`
+    - `debt_18: Optional[str]`
+    - `remaining_amount_to_pay_18: Optional[str]`
+    - `health_factor_raw_1e18: Optional[str]`
+    - `health_factor_ratio: Optional[str]`
+    - `is_liquidatable: Optional[bool]`
+    - `currency: Optional[str]` (`USD`/`INR`)
+    - `has_currency: Optional[bool]`
+    `}`
+  - `warnings: list[str]`
+
+#### `GET /web3/tx-history/{wallet}`
+- Why used:
+  - Returns transaction history from Solidity events (contract logs) for a wallet.
+  - Covers:
+    - `CollateralDeposited`
+    - `CollateralWithdrawn`
+    - `Borrowed`
+    - `Repaid`
+    - `Liquidated` (as borrower and as liquidator)
+- Request schema:
+  - Path: `wallet: str`
+  - Query:
+    - `chain: str = "bsc"` (`bsc` or `opbnb`)
+    - `from_block: int = 0`
+    - `to_block: str = "latest"` (or numeric string)
+    - `limit: int = 200` (1..1000)
+- Response schema:
+  - `wallet: str`
+  - `chain: str`
+  - `contract_address: str`
+  - `from_block: int`
+  - `to_block: int | str`
+  - `total_records: int`
+  - `returned_records: int`
+  - `records: list[{`
+    - `event_name: str`
+    - `role: str` (`user` / `borrower` / `liquidator`)
+    - `tx_hash: str`
+    - `block_number: int`
+    - `log_index: int`
+    - `block_timestamp: Optional[str]`
+    - `args: dict`
+    - `amount_fields: dict`
+    `}]`
+  - `warnings: list[str]`
 
 #### `GET /web3/health`
 - Why used:
@@ -511,4 +581,3 @@ BNPL + collateral proof flow:
 3. `GET /bnpl/safety-meter/{loan_id}`
 4. `POST /bnpl/recovery/partial` (if needed)
 5. `GET /bnpl/proof/{loan_id}`
-

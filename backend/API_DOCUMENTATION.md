@@ -24,7 +24,7 @@ Core responsibilities:
 Additional note:
 - `backend/api/routes.py` is only a compatibility export and does not define separate endpoints.
 
-Total active endpoints in repo: **79**
+Total active endpoints in repo: **81**
 
 ## 3) Common response and error conventions
 
@@ -515,6 +515,45 @@ Typical status codes:
 - `bsc_connected`
 - `opbnb_connected`
 
+`Web3AccountSnapshotResponse`
+- `wallet`
+- `chain`
+- `contract_address`
+- `native_balance_wei`
+- `native_balance_bnb`
+- `account_state`
+  - `source`
+  - `collateral_wei`
+  - `collateral_bnb`
+  - `collateral_fiat_18`
+  - `debt_18`
+  - `remaining_amount_to_pay_18`
+  - `health_factor_raw_1e18`
+  - `health_factor_ratio`
+  - `is_liquidatable`
+  - `currency`
+  - `has_currency`
+- `warnings[]`
+
+`Web3TxHistoryResponse`
+- `wallet`
+- `chain`
+- `contract_address`
+- `from_block`
+- `to_block`
+- `total_records`
+- `returned_records`
+- `records[]`
+  - `event_name`
+  - `role`
+  - `tx_hash`
+  - `block_number`
+  - `log_index`
+  - `block_timestamp`
+  - `args`
+  - `amount_fields`
+- `warnings[]`
+
 `BnplFeatureStatusResponse`
 - `implemented[]`
 - `razorpay_enabled_features[]`
@@ -745,6 +784,8 @@ Typical status codes:
 | GET | `/get-data` | Read contract values (legacy path) | None | `Web3ReadResponse` |
 | GET | `/web3/health` | Web3 provider connectivity | None | `Web3HealthResponse` |
 | GET | `/web3/get-data` | Read contract values (namespaced) | None | `Web3ReadResponse` |
+| GET | `/web3/account/{wallet}` | Get on-chain account snapshot (balance + debt left) | Path: `wallet`; Query: `chain` | `Web3AccountSnapshotResponse` |
+| GET | `/web3/tx-history/{wallet}` | Get on-chain contract event transaction history | Path: `wallet`; Query: `chain`, `from_block`, `to_block`, `limit` | `Web3TxHistoryResponse` |
 
 ### 6.5 BNPL APIs
 

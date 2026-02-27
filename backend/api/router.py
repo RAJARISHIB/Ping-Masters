@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import logging
 from typing import Optional, Union
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field, ValidationError
 from web3 import Web3
 
@@ -1067,6 +1067,51 @@ def build_web3_router(web3_manager: Optional[Web3ClientManager], read_function: 
             raise
         except Exception as exc:
             logger.exception("Web3 namespaced get-data endpoint failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.get("/web3/account/{wallet}", summary="Get on-chain wallet account snapshot")
+    def web3_account(wallet: str, chain: str = Query(default="bsc")) -> dict:
+        """Fetch native balance + contract state + remaining debt for a wallet."""
+        try:
+            return _require_web3_manager(web3_manager).get_wallet_protocol_summary(wallet=wallet, chain=chain)
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        except Exception as exc:
+            logger.exception("Web3 account snapshot endpoint failed wallet=%s chain=%s", wallet, chain)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    @router.get("/web3/tx-history/{wallet}", summary="Get on-chain wallet transaction history")
+    def web3_tx_history(
+        wallet: str,
+        chain: str = Query(default="bsc"),
+        from_block: int = Query(default=0, ge=0),
+        to_block: str = Query(default="latest"),
+        limit: int = Query(default=200, ge=1, le=1000),
+    ) -> dict:
+        """Fetch wallet event history from contract logs with tx hashes."""
+        try:
+            return _require_web3_manager(web3_manager).get_wallet_transaction_history(
+                wallet=wallet,
+                chain=chain,
+                from_block=from_block,
+                to_block=to_block,
+                limit=limit,
+            )
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        except Exception as exc:
+            logger.exception(
+                "Web3 transaction history endpoint failed wallet=%s chain=%s from_block=%s to_block=%s limit=%s",
+                wallet,
+                chain,
+                from_block,
+                to_block,
+                limit,
+            )
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
 
     return router
