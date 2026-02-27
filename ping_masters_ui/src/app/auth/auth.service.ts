@@ -36,6 +36,37 @@ export class AuthService {
     await signOut(this.auth);
   }
 
+  async needsGetStarted(uid: string): Promise<boolean> {
+    const userRef = doc(this.firestore, 'user', uid);
+    const snapshot = await getDoc(userRef);
+    if (!snapshot.exists()) return true;
+
+    const data = snapshot.data() as { wallet_address?: unknown } | undefined;
+    const wallets = data?.wallet_address;
+    return !Array.isArray(wallets) || wallets.length === 0;
+  }
+
+  async saveGetStartedDetails(
+    uid: string,
+    details: {
+      wallet_address: Array<{ name: string; wallet_id: string }>;
+      mobile_number: string | null;
+      notification_channels: string[];
+    }
+  ): Promise<void> {
+    const userRef = doc(this.firestore, 'user', uid);
+
+    await setDoc(
+      userRef,
+      {
+        wallet_address: details.wallet_address,
+        mobile_number: details.mobile_number,
+        notification_channels: details.notification_channels
+      },
+      { merge: true }
+    );
+  }
+
   private async ensureUserDocument(user: User, info: AdditionalUserInfo | null): Promise<void> {
     const userRef = doc(this.firestore, 'user', user.uid);
     const snapshot = await getDoc(userRef);

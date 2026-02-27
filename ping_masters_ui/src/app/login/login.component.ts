@@ -1,5 +1,9 @@
 import { AsyncPipe } from '@angular/common';
 import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { Router } from '@angular/router';
+import type { User } from 'firebase/auth';
+import { distinctUntilChanged, filter, map, switchMap } from 'rxjs/operators';
 import { AuthService } from '../auth/auth.service';
 
 @Component({
@@ -11,10 +15,26 @@ import { AuthService } from '../auth/auth.service';
 })
 export class LoginComponent {
   private readonly authService = inject(AuthService);
+  private readonly router = inject(Router);
 
   readonly user$ = this.authService.user$;
   readonly working = signal(false);
   readonly error = signal<string | null>(null);
+
+  constructor() {
+    this.user$
+      .pipe(
+        filter((user): user is User => user !== null),
+        map((user) => user.uid),
+        distinctUntilChanged(),
+        switchMap((uid) => this.authService.needsGetStarted(uid)),
+        filter((needsGetStarted) => needsGetStarted),
+        takeUntilDestroyed()
+      )
+      .subscribe(() => {
+        this.router.navigateByUrl('/get-started');
+      });
+  }
 
   async signInWithGoogle(): Promise<void> {
     await this.run(() => this.authService.signInWithGoogle());
@@ -73,4 +93,3 @@ export class LoginComponent {
     return typeof code === 'string' ? code : null;
   }
 }
-
