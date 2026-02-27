@@ -23,6 +23,18 @@ class AppSettings:
     debug: bool
     host: str
     port: int
+    firebase_enabled: bool
+    firebase_project_id: Optional[str]
+    firebase_credentials_path: Optional[str]
+    firebase_users_collection: str
+    firebase_profile_collection: str
+    web3_enabled: bool
+    bsc_rpc_url: Optional[str]
+    opbnb_rpc_url: Optional[str]
+    contract_abi_json: Optional[str]
+    bsc_contract_address: Optional[str]
+    opbnb_contract_address: Optional[str]
+    web3_read_function: str
 
 
 def _to_bool(value: str, default: bool = False) -> bool:
@@ -67,5 +79,34 @@ def load_settings() -> AppSettings:
     debug = _to_bool(get_env("DEBUG", "false") or "false")
     host = get_env("HOST", "127.0.0.1") or "127.0.0.1"
     port = _to_int(get_env("PORT", "8000"), 8000)
+    firebase_enabled = _to_bool(get_env("FIREBASE_ENABLED", "false") or "false")
+    firebase_project_id = get_env("FIREBASE_PROJECT_ID", None)
+    firebase_credentials_path = get_env("FIREBASE_CREDENTIALS_PATH", None)
+    firebase_users_collection = get_env("FIREBASE_USERS_COLLECTION", "users") or "users"
+    firebase_profile_collection = get_env("FIREBASE_PROFILE_COLLECTION", "firebase_users") or "firebase_users"
+    web3_enabled = _to_bool(get_env("WEB3_ENABLED", "false") or "false")
+    bsc_rpc_url = get_env("BSC_RPC_URL", None)
+    opbnb_rpc_url = get_env("OPBNB_RPC_URL", None)
+    contract_abi_json = get_env("CONTRACT_ABI_JSON", None)
+    bsc_contract_address = get_env("BSC_CONTRACT_ADDRESS", None)
+    opbnb_contract_address = get_env("OPBNB_CONTRACT_ADDRESS", None)
+    web3_read_function = get_env("WEB3_READ_FUNCTION", "getValue") or "getValue"
 
-    return AppSettings(app_name=app_name, debug=debug, host=host, port=port)
+    return AppSettings(
+        app_name=app_name,
+        debug=debug,
+        host=host,
+        port=port,
+        firebase_enabled=firebase_enabled,
+        firebase_project_id=firebase_project_id,
+        firebase_credentials_path=firebase_credentials_path,
+        firebase_users_collection=firebase_users_collection,
+        firebase_profile_collection=firebase_profile_collection,
+        web3_enabled=web3_enabled,
+        bsc_rpc_url=bsc_rpc_url,
+        opbnb_rpc_url=opbnb_rpc_url,
+        contract_abi_json=contract_abi_json,
+        bsc_contract_address=bsc_contract_address,
+        opbnb_contract_address=opbnb_contract_address,
+        web3_read_function=web3_read_function,
+    )

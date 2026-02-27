@@ -3,7 +3,7 @@
 from fastapi import FastAPI
 import uvicorn
 
-from api.routes import build_router
+from api.router import build_router
 from core import get_logger, load_settings, setup_logging
 
 

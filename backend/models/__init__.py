@@ -23,13 +23,14 @@ from .repositories import (
     UserRepository,
 )
 from .risk_scores import RiskScoreModel
-from .users import UserModel
+from .users import UserModel, WalletAddressModel
 
 __all__ = [
     "BaseDocumentModel",
     "Money",
     "PercentageBps",
     "UserModel",
+    "WalletAddressModel",
     "LoanModel",
     "CollateralModel",
     "RiskScoreModel",

@@ -26,9 +26,14 @@ class ModelValidationTests(unittest.TestCase):
             phone="9999999999",
             full_name="Test User",
             notification_channels=["Email", "whatsapp", "email"],
+            wallet_address=[
+                {"name": "Primary", "wallet_id": "0x1234567890"},
+                {"name": "Backup", "wallet_id": "0xabcdef1234"},
+            ],
         )
         self.assertEqual(user.user_id, "usr_1")
         self.assertEqual(user.notification_channels, ["email", "whatsapp"])
+        self.assertEqual(user.wallet_address[0].name, "Primary")
 
     def test_loan_threshold_validation(self) -> None:
         """Reject invalid threshold relationships."""
