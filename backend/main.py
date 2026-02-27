@@ -1,19 +1,37 @@
+"""Application entrypoint for the Ping Masters FastAPI backend."""
+
 from fastapi import FastAPI
 import uvicorn
 
-
-app = FastAPI(title="Ping Masters API")
-
-
-@app.get("/")
-def read_root() -> dict[str, str]:
-    return {"message": "Ping Masters API is running"}
+from api.routes import build_router
+from core import get_logger, load_settings, setup_logging
 
 
-@app.get("/health")
-def health_check() -> dict[str, str]:
-    return {"status": "ok"}
+setup_logging()
+logger = get_logger(__name__)
+
+
+def create_app() -> FastAPI:
+    """Create and configure a FastAPI application instance."""
+    settings = load_settings()
+    app = FastAPI(title=settings.app_name, debug=settings.debug)
+    app.include_router(build_router(settings))
+    logger.info("Application initialized: %s", settings.app_name)
+    return app
+
+
+app = create_app()
+
+
+def run() -> None:
+    """Start the ASGI server for local development."""
+    settings = load_settings()
+    try:
+        uvicorn.run("main:app", host=settings.host, port=settings.port, reload=settings.debug)
+    except Exception:
+        logger.exception("Failed to start uvicorn server.")
+        raise
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    run()
