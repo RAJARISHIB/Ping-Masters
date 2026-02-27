@@ -24,7 +24,7 @@ Core responsibilities:
 Additional note:
 - `backend/api/routes.py` is only a compatibility export and does not define separate endpoints.
 
-Total active endpoints in repo: **81**
+Total active endpoints in repo: **130+** (including BNPL enterprise extension APIs)
 
 ## 3) Common response and error conventions
 
@@ -822,7 +822,60 @@ Typical status codes:
 | GET | `/bnpl/audit/events` | Audit event logs | Query: `limit` | `BnplAuditEventsResponse` |
 | PATCH | `/bnpl/admin/pause` | Emergency pause control | Headers: `x-admin-role`, `x-actor-id`; Body: `BnplAdminPauseRequest` | `BnplAdminPauseResponse` |
 
-### 6.6 Risk v2 API (`backend/api/risk_routes.py`)
+### 6.6 BNPL Enterprise Extension APIs (Epics 1-12)
+
+| Method | Path | Use | Request payload schema | Response payload schema |
+|---|---|---|---|---|
+| POST | `/bnpl/compliance/kyc` | Update KYC lifecycle | Headers: `x-admin-role`, `x-actor-id`; Body: `KycStatusUpdateRequest` | `{"user_id","kyc_status","kyc_level",...}` |
+| GET | `/bnpl/compliance/kyc/{user_id}` | Read KYC state | Path: `user_id` | `{"user_id","kyc_status",...}` |
+| POST | `/bnpl/compliance/aml/screen` | Run AML/sanctions screening | Headers: `x-admin-role`, `x-actor-id`; Body: `AmlScreeningRequest` | `{"user_id","provider","status","risk_flags",...}` |
+| GET | `/bnpl/compliance/aml/{user_id}` | Read AML screening status | Path: `user_id` | `{"user_id","aml_status",...}` |
+| POST | `/bnpl/wallets/verify/challenge` | Create sign-message challenge | Body: `WalletVerificationChallengeRequest` | `{"message","nonce","expires_at",...}` |
+| POST | `/bnpl/wallets/verify/confirm` | Verify signed wallet challenge | Body: `WalletVerificationConfirmRequest` | `{"verified", "verified_wallets", ...}` |
+| GET | `/bnpl/wallets/verify/{user_id}` | Get verified wallets | Path: `user_id` | `{"verified_wallets",...}` |
+| GET | `/bnpl/collateral/policies` | List collateral asset policy map | None | `{"total","policies"}` |
+| PUT | `/bnpl/collateral/policies/{asset_symbol}` | Update per-asset policy | Headers: `x-admin-role`, `x-actor-id`; Body: `CollateralPolicyUpdateRequest` | `policy object` |
+| GET | `/bnpl/disputes/pause-rules` | Get dispute pause rules | None | `category->rule map` |
+| PUT | `/bnpl/disputes/pause-rules/{category}` | Update pause rules by dispute category | Headers: `x-admin-role`, `x-actor-id`; Body: `DisputePauseRuleRequest` | `{"category","rule"}` |
+| POST | `/bnpl/disputes/{dispute_id}/evidence` | Attach dispute evidence metadata | Header: `x-actor-id`; Body: `DisputeEvidenceRequest` | `{"dispute_id","evidence"}` |
+| GET | `/bnpl/disputes/loan/{loan_id}` | List disputes for loan | Path: `loan_id` | `{"loan_id","total","disputes"}` |
+| POST | `/bnpl/loans/{loan_id}/state` | Enforced loan state transition | Headers: `x-admin-role`, `x-actor-id`; Body: `LoanStateTransitionRequest` | `{"from_status","to_status"}` |
+| POST | `/bnpl/loans/{loan_id}/close` | Close loan with reconciliation | Headers: `x-admin-role`, `x-actor-id`; Body: `LoanCloseRequest` | `{"status":"CLOSED","release":...}` |
+| POST | `/bnpl/loans/{loan_id}/collateral/release` | Release unlocked collateral | Header: `x-actor-id` | `{"released_total_minor","releases":[...]}` |
+| POST | `/bnpl/loans/{loan_id}/cancel` | Cancel pre-settlement order | Header: `x-actor-id`; Body: `LoanCancelRequest` | `{"order", "release"}` |
+| POST | `/bnpl/loans/{loan_id}/refund-adjust` | Apply full/partial refund adjustment | Header: `x-actor-id`; Body: `LoanRefundAdjustmentRequest` | `{"loan","refund_applied_minor"}` |
+| POST | `/bnpl/payments/installment` | Pay scheduled installment | Headers: `x-actor-id`, `x-idempotency-key`; Body: `InstallmentPaymentRequest` | `{"payment_attempt","loan","installment"}` |
+| POST | `/bnpl/payments/pay-now` | Manual pay-now flow | Headers: `x-actor-id`, `x-idempotency-key`; Body: `PayNowRequest` | `{"paid_minor","unapplied_minor","loan"}` |
+| POST | `/bnpl/payments/retry` | Retry failed payment | Header: `x-actor-id`; Body: `PaymentRetryRequest` | `{"retry_count","result"}` |
+| POST | `/bnpl/payments/webhooks/razorpay` | Reconcile Razorpay webhook event | Header: `x-razorpay-signature`; Body: `RazorpayWebhookRequest` | `{"processed","event_id","order_id"}` |
+| POST | `/bnpl/payments/late-fee/apply` | Apply late fee rules | Header: `x-actor-id`; Body: `BnplMissedSimulationRequest` | `{"late_fee_applied_minor",...}` |
+| POST | `/bnpl/payments/late-fee/waive` | Waive/reverse late fee | Headers: `x-admin-role`, `x-actor-id`; Body: `LateFeeWaiveRequest` | `{"loan","installment","ledger_entry"}` |
+| POST | `/bnpl/reminders/schedule` | Schedule due/grace reminders | Header: `x-actor-id`; Body: `ReminderScheduleRequest` | `{"scheduled_count","reminders"}` |
+| POST | `/bnpl/reminders/run-due` | Execute due reminder dispatch | Header: `x-actor-id` | `{"processed","deliveries"}` |
+| POST | `/bnpl/notifications/send` | Send notification via channel abstraction | Header: `x-actor-id`; Body: `NotificationSendRequest` | `notification record` |
+| GET | `/bnpl/oracle/resolve` | Resolve oracle with fallback + stale rules | Query: `max_age_sec`, `block_on_stale` | `{"healthy","selected","prices",...}` |
+| POST | `/bnpl/risk/monitor` | Portfolio risk scan worker API | Query: `threshold_ratio` | `{"scanned_loans","flagged_loans","flags"}` |
+| POST | `/bnpl/recovery/full` | Full liquidation / bad debt flow | Header: `x-admin-role`; Body: `FullLiquidationRequest` | `{"loan","liquidation_log","residual_bad_debt_minor"}` |
+| POST | `/bnpl/fraud/check` | Fraud/abuse heuristic checks | Body: `FraudCheckRequest` | `{"flags","status",...}` |
+| GET | `/bnpl/ops/dashboard` | Internal ops dashboard | Header: `x-admin-role` | `counts + kpis + recent failures` |
+| GET | `/bnpl/ledger` | Ledger records for accounting reconstruction | Query: `loan_id`, `user_id`, `limit` | `{"total","entries"}` |
+| GET | `/bnpl/metrics/kpi` | KPI metrics endpoint | None | `approval/default/refund/dispute/liquidation metrics` |
+| POST | `/bnpl/jobs/enqueue` | Enqueue async scheduler job | Header: `x-actor-id`; Body: `JobEnqueueRequest` | `job payload` |
+| POST | `/bnpl/jobs/run-due` | Execute due jobs | Header: `x-actor-id` | `{"processed","jobs"}` |
+| POST | `/bnpl/merchant/onboard` | Merchant onboarding + API key | Headers: `x-admin-role`, `x-actor-id`; Body: `MerchantOnboardRequest` | `merchant record` |
+| POST | `/bnpl/merchant/auth/validate` | Validate merchant API key | Body: `MerchantAuthRequest` | `{"valid","active"}` |
+| PATCH | `/bnpl/merchant/orders/{order_id}/status` | Merchant order/fulfillment sync | Headers: `x-admin-role`, `x-actor-id`; Body: `MerchantOrderStatusRequest` | `updated order` |
+| GET | `/bnpl/merchant/{merchant_id}/settlements` | Settlement lifecycle tracking | Path: `merchant_id` | `{"lifecycle","orders"}` |
+| GET | `/bnpl/merchant/{merchant_id}/risk-score` | Merchant risk scoring | Path: `merchant_id` | `{"merchant_risk_score","signals"}` |
+| POST | `/bnpl/admin/manual/waive-penalty` | Manual override penalty waiver | Headers: `x-admin-role`, `x-actor-id`; Body: `LateFeeWaiveRequest` | `waive result` |
+| POST | `/bnpl/admin/manual/force-close/{loan_id}` | Manual force-close | Headers: `x-admin-role`, `x-actor-id`; Body: `LoanCancelRequest` | `force close result` |
+| POST | `/bnpl/admin/manual/retry-settlement/{order_id}` | Manual settlement retry | Headers: `x-admin-role`, `x-actor-id` | `updated order` |
+| GET | `/bnpl/users/{user_id}/loans` | User active/closed/defaulted loans list | Path: `user_id`; Query: `include_closed` | `loan summaries` |
+| GET | `/bnpl/loans/{loan_id}/detail` | Full loan detail payload | Path: `loan_id` | `loan + collateral + health + dispute + fee summary` |
+| GET | `/bnpl/loans/{loan_id}/installments` | Installment schedule/history | Path: `loan_id` | `{"total","installments"}` |
+| GET | `/bnpl/loans/{loan_id}/payments` | Payment/retry history timeline | Path: `loan_id`; Query: `limit` | `{"total","payments"}` |
+
+### 6.7 Risk v2 API (`backend/api/risk_routes.py`)
 
 | Method | Path | Use | Request payload schema | Response payload schema |
 |---|---|---|---|---|
@@ -830,7 +883,7 @@ Typical status codes:
 
 ---
 
-## 7) Important integration notes
+## 8) Important integration notes
 
 - Firestore-dependent APIs (`/users*`, `/firebase/health`, many BNPL flows in Firestore mode) return `503` when Firebase client is unavailable.
 - Web3-dependent APIs (`/get-data`, `/web3/*`, `/wallet/balance` chain RPC) return `503` if provider/config is unavailable.
@@ -838,7 +891,10 @@ Typical status codes:
 - BNPL admin routes require headers:
   - `x-admin-role: ADMIN|PAUSER` for `/bnpl/admin/pause`
   - `x-admin-role: ADMIN|LIQUIDATOR` for `/bnpl/recovery/partial`
+  - `x-admin-role: ADMIN|SUPPORT|REVIEWER` for compliance, manual-review, and state-transition endpoints
+- Write-heavy BNPL routes support idempotency through `x-idempotency-key` (currently enforced on plan create, collateral lock/topup, installment pay-now/payment, and settlement).
+- Sensitive payment routes are rate-limited per caller/IP and return `429` on bursts.
 
-## 8) Testing tip
+## 9) Testing tip
 
 Use `GET /settings` first to verify which integrations are enabled before calling dependency-heavy endpoints.

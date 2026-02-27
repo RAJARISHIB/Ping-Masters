@@ -75,7 +75,7 @@ class LoanModel(BaseDocumentModel):
             if outstanding_minor > principal_minor + penalty_accrued_minor:
                 raise ValueError("outstanding_minor exceeds principal + penalty_accrued_minor")
 
-            if status == LoanStatus.DISPUTE_OPEN and paused_penalties_until is None:
+            if status in {LoanStatus.DISPUTE_OPEN, LoanStatus.DISPUTED} and paused_penalties_until is None:
                 raise ValueError("paused_penalties_until is required when status is DISPUTE_OPEN")
 
             return values

@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hmac
 import hashlib
+import json
 import logging
+from random import random
+import secrets
 from threading import RLock
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from uuid import uuid4
+
+from eth_account.messages import encode_defunct
+from web3 import Web3
 
 from common.emi_plan_catalog import EmiPlanCatalog
 from core.config import AppSettings
@@ -18,21 +25,76 @@ from ml.orchestrator import MlPayloadOrchestrator
 from models.collaterals import CollateralModel
 from models.enums import (
     CollateralStatus,
+    DisputeCategory,
     InstallmentStatus,
+    KycStatus,
     LiquidationActionType,
     LoanStatus,
+    MerchantStatus,
     RiskTier,
+    ScreeningStatus,
+    SettlementStatus,
+    UserRole,
 )
 from models.installments import InstallmentModel
 from models.liquidation_logs import LiquidationLogModel
 from models.loans import LoanModel
 from models.risk_scores import RiskScoreModel
+from models.users import UserModel
 from repositories.firestore_user_repository import FirestoreUserRepository
 
 
 logger = logging.getLogger(__name__)
 
 FilterTuple = Tuple[str, str, Any]
+
+DEFAULT_LOAN_TRANSITIONS: Dict[LoanStatus, set] = {
+    LoanStatus.DRAFT: {LoanStatus.PENDING_KYC, LoanStatus.ELIGIBLE, LoanStatus.CANCELLED},
+    LoanStatus.PENDING_KYC: {LoanStatus.ELIGIBLE, LoanStatus.CANCELLED},
+    LoanStatus.ELIGIBLE: {LoanStatus.ACTIVE, LoanStatus.CANCELLED},
+    LoanStatus.ACTIVE: {
+        LoanStatus.GRACE,
+        LoanStatus.OVERDUE,
+        LoanStatus.DELINQUENT,
+        LoanStatus.DISPUTE_OPEN,
+        LoanStatus.DISPUTED,
+        LoanStatus.PARTIALLY_RECOVERED,
+        LoanStatus.CLOSED,
+        LoanStatus.DEFAULTED,
+    },
+    LoanStatus.GRACE: {
+        LoanStatus.ACTIVE,
+        LoanStatus.OVERDUE,
+        LoanStatus.DELINQUENT,
+        LoanStatus.DISPUTED,
+        LoanStatus.PARTIALLY_RECOVERED,
+        LoanStatus.CLOSED,
+        LoanStatus.DEFAULTED,
+    },
+    LoanStatus.OVERDUE: {
+        LoanStatus.GRACE,
+        LoanStatus.DELINQUENT,
+        LoanStatus.PARTIALLY_RECOVERED,
+        LoanStatus.DEFAULTED,
+        LoanStatus.CLOSED,
+    },
+    LoanStatus.DELINQUENT: {
+        LoanStatus.PARTIALLY_RECOVERED,
+        LoanStatus.DEFAULTED,
+        LoanStatus.CLOSED,
+    },
+    LoanStatus.DISPUTE_OPEN: {LoanStatus.DISPUTED, LoanStatus.ACTIVE, LoanStatus.CLOSED},
+    LoanStatus.DISPUTED: {LoanStatus.ACTIVE, LoanStatus.CLOSED, LoanStatus.DEFAULTED},
+    LoanStatus.PARTIALLY_RECOVERED: {LoanStatus.ACTIVE, LoanStatus.DELINQUENT, LoanStatus.DEFAULTED, LoanStatus.CLOSED},
+    LoanStatus.DEFAULTED: {LoanStatus.CLOSED},
+    LoanStatus.CLOSED: set(),
+    LoanStatus.CANCELLED: set(),
+}
+
+RISKY_DISPUTE_CATEGORIES = {
+    DisputeCategory.FRAUD.value,
+    DisputeCategory.DUPLICATE_CHARGE.value,
+}
 
 
 def _now_utc() -> datetime:
@@ -97,7 +159,17 @@ class BnplFeatureService:
             "alerts": "bnpl_alerts",
             "events": "bnpl_events",
             "settings": "bnpl_settings",
+            "payments": "bnpl_payment_attempts",
+            "disputes": "bnpl_disputes",
+            "notifications": "bnpl_notifications",
+            "ledger": "bnpl_ledger",
+            "jobs": "bnpl_jobs",
+            "idempotency": "bnpl_idempotency",
+            "merchants": "bnpl_merchants",
+            "reminders": "bnpl_reminders",
+            "fraud_flags": "bnpl_fraud_flags",
         }
+        self._rate_limit_cache: Dict[str, Dict[str, Any]] = {}
 
     def _new_id(self, prefix: str) -> str:
         """Generate a prefixed unique identifier."""
@@ -208,14 +280,32 @@ class BnplFeatureService:
         if pause_state.get("paused", False):
             raise ValueError("Protocol is paused. Risky actions are temporarily disabled.")
 
-    def _record_event(self, event_type: str, actor: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Store audit-friendly event log for protocol actions."""
+    def _record_event(
+        self,
+        event_type: str,
+        actor: str,
+        payload: Dict[str, Any],
+        entity_type: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        actor_role: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        before: Optional[Dict[str, Any]] = None,
+        after: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Store structured audit event logs for protocol actions."""
         event_id = self._new_id("evt")
+        event_correlation_id = correlation_id or payload.get("correlation_id") or self._new_id("corr")
         event_payload = {
             "event_id": event_id,
             "event_type": event_type,
             "actor": actor,
+            "actor_role": actor_role or UserRole.USER.value,
+            "entity_type": entity_type or "GENERIC",
+            "entity_id": entity_id or "",
+            "correlation_id": event_correlation_id,
             "payload": payload,
+            "before": before,
+            "after": after,
             "created_at": _now_utc(),
             "updated_at": _now_utc(),
         }
@@ -296,6 +386,173 @@ class BnplFeatureService:
             self._user_repository.update(user)
         except Exception:
             logger.exception("Failed updating user counters user_id=%s", user_id)
+
+    def _load_user(self, user_id: str) -> UserModel:
+        """Load user profile from repository."""
+        if self._user_repository is None:
+            raise ValueError("User repository unavailable.")
+        try:
+            return self._user_repository.get_by_id(user_id)
+        except Exception:
+            logger.exception("Failed loading user profile user_id=%s", user_id)
+            raise
+
+    def _save_user(self, user: UserModel) -> UserModel:
+        """Persist user profile using optimistic version updates."""
+        if self._user_repository is None:
+            raise ValueError("User repository unavailable.")
+        try:
+            user.version += 1
+            return self._user_repository.update(user)
+        except Exception:
+            logger.exception("Failed saving user profile user_id=%s", user.user_id)
+            raise
+
+    def _ensure_user_compliance(self, user_id: str) -> Dict[str, Any]:
+        """Validate user KYC + AML status before credit actions."""
+        if self._user_repository is None:
+            return {
+                "kyc_status": "BYPASS_NO_REPOSITORY",
+                "aml_status": "BYPASS_NO_REPOSITORY",
+                "user_id": user_id,
+            }
+        user = self._load_user(user_id)
+        if user.kyc_status != KycStatus.VERIFIED:
+            raise ValueError("KYC verification is required before creating a BNPL loan.")
+        if user.aml_status in {ScreeningStatus.FLAGGED, ScreeningStatus.BLOCKED}:
+            raise ValueError("AML screening failed. Borrowing is blocked.")
+        if user.aml_status == ScreeningStatus.NOT_SCREENED:
+            raise ValueError("AML screening is required before creating a BNPL loan.")
+        return {
+            "kyc_status": user.kyc_status.value,
+            "aml_status": user.aml_status.value,
+            "user_id": user.user_id,
+        }
+
+    def _get_setting_value(self, key: str, default: Any) -> Any:
+        """Read one setting value with defaults."""
+        payload = self._get_document("settings", key)
+        if payload is None:
+            return default
+        return payload.get("value", default)
+
+    def _put_setting_value(self, key: str, value: Any, actor: str = "system") -> Dict[str, Any]:
+        """Persist one setting value."""
+        payload = {
+            "id": key,
+            "value": value,
+            "updated_by": actor,
+            "created_at": _now_utc(),
+            "updated_at": _now_utc(),
+        }
+        return self._set_document("settings", key, payload, merge=False)
+
+    def _default_asset_policies(self) -> Dict[str, Dict[str, Any]]:
+        """Return built-in collateral policies used when no policy config exists."""
+        return {
+            "BNB": {
+                "asset_symbol": "BNB",
+                "chain": "bsc",
+                "ltv_bps": 6500,
+                "liquidation_threshold_bps": 8500,
+                "liquidation_penalty_bps": 700,
+                "min_deposit_minor": 1000,
+                "decimals": 18,
+                "enabled": True,
+            },
+            "USDT": {
+                "asset_symbol": "USDT",
+                "chain": "bsc",
+                "ltv_bps": 8000,
+                "liquidation_threshold_bps": 9000,
+                "liquidation_penalty_bps": 500,
+                "min_deposit_minor": 100,
+                "decimals": 18,
+                "enabled": True,
+            },
+            "USDC": {
+                "asset_symbol": "USDC",
+                "chain": "bsc",
+                "ltv_bps": 8000,
+                "liquidation_threshold_bps": 9000,
+                "liquidation_penalty_bps": 500,
+                "min_deposit_minor": 100,
+                "decimals": 18,
+                "enabled": True,
+            },
+        }
+
+    def _get_asset_policy(self, asset_symbol: str) -> Dict[str, Any]:
+        """Fetch asset-level collateral policy from settings."""
+        symbol = asset_symbol.strip().upper()
+        policies = self._get_setting_value("collateral_asset_policies", self._default_asset_policies())
+        policy = policies.get(symbol)
+        if policy is None or not bool(policy.get("enabled", True)):
+            raise ValueError("Unsupported or disabled collateral asset: {0}".format(symbol))
+        return policy
+
+    def _assert_allowed_transition(self, current_status: LoanStatus, new_status: LoanStatus) -> None:
+        """Validate explicit loan-state transitions."""
+        allowed = DEFAULT_LOAN_TRANSITIONS.get(current_status, set())
+        if new_status not in allowed:
+            raise ValueError(
+                "Invalid loan state transition: {0} -> {1}".format(current_status.value, new_status.value)
+            )
+
+    def _record_ledger_entry(
+        self,
+        loan_id: str,
+        user_id: str,
+        entry_type: str,
+        amount_minor: int,
+        currency: str,
+        reference_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Persist financial ledger entries for all balance-changing actions."""
+        ledger_id = self._new_id("led")
+        payload = {
+            "ledger_id": ledger_id,
+            "loan_id": loan_id,
+            "user_id": user_id,
+            "entry_type": entry_type,
+            "amount_minor": int(max(0, amount_minor)),
+            "currency": currency.upper(),
+            "reference_id": reference_id,
+            "metadata": metadata or {},
+            "created_at": _now_utc(),
+            "updated_at": _now_utc(),
+            "is_deleted": False,
+        }
+        self._set_document("ledger", ledger_id, payload, merge=False)
+        return payload
+
+    def _check_idempotency(self, operation: str, idempotency_key: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Guard critical write operations from duplicate execution."""
+        normalized = (idempotency_key or "").strip()
+        if not normalized:
+            return None
+        unique_key = "{0}:{1}".format(operation, normalized)
+        existing = self._get_document("idempotency", unique_key)
+        if existing is not None:
+            return existing.get("response")
+        return None
+
+    def _store_idempotency(self, operation: str, idempotency_key: Optional[str], response: Dict[str, Any]) -> None:
+        """Store idempotent operation response for replay-safe returns."""
+        normalized = (idempotency_key or "").strip()
+        if not normalized:
+            return
+        unique_key = "{0}:{1}".format(operation, normalized)
+        payload = {
+            "id": unique_key,
+            "operation": operation,
+            "key": normalized,
+            "response": response,
+            "created_at": _now_utc(),
+            "updated_at": _now_utc(),
+        }
+        self._set_document("idempotency", unique_key, payload, merge=False)
 
     def _risk_tier_from_metrics(self, safety_ratio: float, missed_count: int, avg_delay_hours: float) -> RiskTier:
         """Convert behavioral metrics into a risk tier."""
@@ -408,10 +665,15 @@ class BnplFeatureService:
         late_fee_bps: int,
         emi_plan_id: Optional[str] = None,
         use_plan_defaults: bool = True,
+        idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create BNPL plan and installment schedule (Features 2, 6, 16)."""
         self._ensure_not_paused()
         try:
+            cached = self._check_idempotency("create_bnpl_plan", idempotency_key=idempotency_key)
+            if cached is not None:
+                return cached
+            compliance_snapshot = self._ensure_user_compliance(user_id=user_id)
             if principal_minor <= 0:
                 raise ValueError("principal_minor must be > 0")
             if installment_count <= 0:
@@ -520,10 +782,14 @@ class BnplFeatureService:
                     "principal_minor": principal_minor,
                     "currency": normalized_currency,
                     "emi_plan_id": emi_plan_id,
+                    "compliance": compliance_snapshot,
                 },
+                entity_type="LOAN",
+                entity_id=persisted_loan.loan_id,
+                actor_role=UserRole.USER.value,
             )
 
-            return {
+            response = {
                 "loan": persisted_loan.to_firestore(),
                 "installments": [item.to_firestore() for item in persisted_installments],
                 "emi_plan": (
@@ -532,6 +798,8 @@ class BnplFeatureService:
                     else (selected_plan.dict() if selected_plan is not None else None)
                 ),
             }
+            self._store_idempotency("create_bnpl_plan", idempotency_key=idempotency_key, response=response)
+            return response
         except Exception:
             logger.exception("Failed creating BNPL plan user_id=%s merchant_id=%s", user_id, merchant_id)
             raise
@@ -548,14 +816,27 @@ class BnplFeatureService:
         chain_id: int,
         deposit_tx_hash: str,
         proof_page_url: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Lock refundable security deposit in vault (Feature 1)."""
         self._ensure_not_paused()
         try:
+            cached = self._check_idempotency("lock_security_deposit", idempotency_key=idempotency_key)
+            if cached is not None:
+                return cached
+            if self._user_repository is not None:
+                user = self._load_user(user_id)
+                if not user.verified_wallets:
+                    raise ValueError("At least one verified wallet is required for collateral operations.")
             if deposited_units <= 0:
                 raise ValueError("deposited_units must be > 0")
             if collateral_value_minor <= 0:
                 raise ValueError("collateral_value_minor must be > 0")
+            policy = self._get_asset_policy(asset_symbol=asset_symbol)
+            if int(collateral_value_minor) < int(policy.get("min_deposit_minor", 0)):
+                raise ValueError(
+                    "Collateral value is below the minimum required deposit for asset {0}".format(asset_symbol.upper())
+                )
             loan = self._load_loan(loan_id)
 
             collateral = CollateralModel(
@@ -566,6 +847,7 @@ class BnplFeatureService:
                 chain_id=chain_id,
                 deposit_tx_hash=deposit_tx_hash,
                 asset_symbol=asset_symbol.upper(),
+                decimals=int(policy.get("decimals", 18)),
                 deposited_units=int(deposited_units),
                 collateral_value_minor=int(collateral_value_minor),
                 oracle_price_minor=int(oracle_price_minor),
@@ -586,9 +868,14 @@ class BnplFeatureService:
                     "collateral_id": stored.collateral_id,
                     "tx_hash": deposit_tx_hash,
                     "collateral_value_minor": collateral_value_minor,
+                    "asset_policy": policy,
                 },
+                entity_type="COLLATERAL",
+                entity_id=stored.collateral_id,
             )
-            return {"collateral": stored.to_firestore(), "safety_meter": meter}
+            response = {"collateral": stored.to_firestore(), "safety_meter": meter}
+            self._store_idempotency("lock_security_deposit", idempotency_key=idempotency_key, response=response)
+            return response
         except Exception:
             logger.exception("Failed locking security deposit loan_id=%s user_id=%s", loan_id, user_id)
             raise
@@ -600,10 +887,14 @@ class BnplFeatureService:
         added_value_minor: int,
         oracle_price_minor: int,
         topup_tx_hash: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Top-up collateral amount and update safety metrics (Feature 5)."""
         self._ensure_not_paused()
         try:
+            cached = self._check_idempotency("top_up_collateral", idempotency_key=idempotency_key)
+            if cached is not None:
+                return cached
             collateral = self._load_collateral(collateral_id)
             if added_units <= 0:
                 raise ValueError("added_units must be > 0")
@@ -631,7 +922,9 @@ class BnplFeatureService:
                     "tx_hash": topup_tx_hash or "",
                 },
             )
-            return {"collateral": updated_collateral.to_firestore(), "safety_meter": meter}
+            response = {"collateral": updated_collateral.to_firestore(), "safety_meter": meter}
+            self._store_idempotency("top_up_collateral", idempotency_key=idempotency_key, response=response)
+            return response
         except Exception:
             logger.exception("Failed top-up collateral collateral_id=%s", collateral_id)
             raise
@@ -788,21 +1081,62 @@ class BnplFeatureService:
             logger.exception("Failed processing dispute refund loan_id=%s payment_id=%s", loan_id, payment_id)
             raise
 
-    def open_dispute(self, loan_id: str, reason: str, actor: str) -> Dict[str, Any]:
-        """Open dispute and freeze penalties (Feature 9)."""
+    def open_dispute(
+        self,
+        loan_id: str,
+        reason: str,
+        actor: str,
+        category: str = DisputeCategory.PAYMENT_ISSUE.value,
+    ) -> Dict[str, Any]:
+        """Open dispute and freeze penalties based on category policy (Features 7.1, 7.3, 9)."""
         try:
             loan = self._load_loan(loan_id)
-            loan.paused_penalties_until = _now_utc() + timedelta(days=7)
+            normalized_category = str(category).strip().upper()
+            try:
+                dispute_category = DisputeCategory(normalized_category)
+            except Exception:
+                raise ValueError("Invalid dispute category: {0}".format(category))
+
+            pause_rules = self.get_dispute_pause_rules()
+            category_rule = pause_rules.get(dispute_category.value, {})
+            pause_penalties = bool(category_rule.get("pause_penalties", True))
+            pause_liquidation = bool(category_rule.get("pause_liquidation", True))
+            pause_hours = int(category_rule.get("pause_hours", 168))
+            loan.paused_penalties_until = _now_utc() + timedelta(hours=pause_hours) if pause_penalties else _now_utc()
             loan.dispute_state = "OPEN"
             loan.status = LoanStatus.DISPUTE_OPEN
             loan.updated_at = _now_utc()
+            before = loan.to_firestore()
             updated = self._save_loan(loan, merge=False)
+            dispute_id = self._new_id("dsp")
+            dispute_payload = {
+                "dispute_id": dispute_id,
+                "loan_id": loan_id,
+                "user_id": loan.user_id,
+                "merchant_id": loan.merchant_id,
+                "category": dispute_category.value,
+                "reason": reason,
+                "status": "OPEN",
+                "pause_penalties": pause_penalties,
+                "pause_liquidation": pause_liquidation,
+                "opened_by": actor,
+                "opened_at": _now_utc(),
+                "updated_at": _now_utc(),
+                "evidence": [],
+                "comments": [],
+                "review_notes": [],
+            }
+            self._set_document("disputes", dispute_id, dispute_payload, merge=False)
             self._record_event(
                 event_type="DISPUTE_OPENED",
                 actor=actor,
-                payload={"loan_id": loan_id, "reason": reason},
+                payload={"loan_id": loan_id, "reason": reason, "category": dispute_category.value},
+                entity_type="DISPUTE",
+                entity_id=dispute_id,
+                before=before,
+                after=updated.to_firestore(),
             )
-            return {"loan": updated.to_firestore(), "reason": reason}
+            return {"loan": updated.to_firestore(), "reason": reason, "category": dispute_category.value, "dispute_id": dispute_id}
         except Exception:
             logger.exception("Failed opening dispute loan_id=%s", loan_id)
             raise
@@ -819,11 +1153,28 @@ class BnplFeatureService:
         """Resolve dispute and optionally restore active status (Feature 9)."""
         try:
             loan = self._load_loan(loan_id)
+            before = loan.to_firestore()
             loan.dispute_state = "RESOLVED"
             loan.paused_penalties_until = _now_utc()
             loan.status = LoanStatus.ACTIVE if restore_active else LoanStatus.CLOSED
             loan.updated_at = _now_utc()
             updated = self._save_loan(loan, merge=False)
+            disputes = self._query_documents(
+                "disputes",
+                filters=[("loan_id", "==", loan_id), ("status", "==", "OPEN")],
+                order_by="opened_at",
+                limit=1,
+            )
+            resolved_dispute: Optional[Dict[str, Any]] = None
+            if disputes:
+                resolved_dispute = dict(disputes[0])
+                resolved_dispute["status"] = "RESOLVED"
+                resolved_dispute["resolution"] = resolution
+                resolved_dispute["resolved_by"] = actor
+                resolved_dispute["resolved_at"] = _now_utc()
+                resolved_dispute["updated_at"] = _now_utc()
+                dispute_id = str(resolved_dispute.get("id") or resolved_dispute.get("dispute_id"))
+                self._set_document("disputes", dispute_id, resolved_dispute, merge=True)
             refund_result: Optional[Dict[str, Any]] = None
             if refund_payment_id:
                 refund_result = self.process_dispute_refund(
@@ -841,8 +1192,17 @@ class BnplFeatureService:
                     "restore_active": restore_active,
                     "refund_payment_id": refund_payment_id,
                 },
+                entity_type="LOAN",
+                entity_id=loan_id,
+                before=before,
+                after=updated.to_firestore(),
             )
-            return {"loan": updated.to_firestore(), "resolution": resolution, "refund": refund_result}
+            return {
+                "loan": updated.to_firestore(),
+                "resolution": resolution,
+                "refund": refund_result,
+                "dispute": resolved_dispute,
+            }
         except Exception:
             logger.exception("Failed resolving dispute loan_id=%s", loan_id)
             raise
@@ -949,9 +1309,18 @@ class BnplFeatureService:
         status: str = "PAID_UPFRONT",
         external_ref: Optional[str] = None,
         use_razorpay: bool = True,
+        idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create merchant settlement/order record (Features 11, 13, 15)."""
         try:
+            cached = self._check_idempotency("merchant_settlement", idempotency_key=idempotency_key)
+            if cached is not None:
+                return cached
+            merchant = self._get_document("merchants", merchant_id)
+            if merchant is not None:
+                merchant_status = str(merchant.get("status", MerchantStatus.PENDING.value)).upper()
+                if merchant_status != MerchantStatus.ACTIVE.value:
+                    raise ValueError("Merchant is not active for settlement operations.")
             order_id = self._new_id("ord")
             gateway_payload: Optional[Dict[str, Any]] = None
             provider = "simulation"
@@ -987,6 +1356,9 @@ class BnplFeatureService:
                 "loan_id": loan_id,
                 "amount_minor": int(amount_minor),
                 "status": status,
+                "settlement_status": (
+                    SettlementStatus.PAID.value if status == "PAID_UPFRONT" else SettlementStatus.PROCESSING.value
+                ),
                 "external_ref": normalized_external_ref,
                 "provider": provider,
                 "provider_error": provider_error,
@@ -1000,7 +1372,10 @@ class BnplFeatureService:
                 event_type="MERCHANT_SETTLEMENT_RECORDED",
                 actor=merchant_id,
                 payload={"order_id": order_id, "loan_id": loan_id, "amount_minor": amount_minor, "status": status},
+                entity_type="ORDER",
+                entity_id=order_id,
             )
+            self._store_idempotency("merchant_settlement", idempotency_key=idempotency_key, response=order_payload)
             return order_payload
         except Exception:
             logger.exception("Failed simulating merchant settlement merchant_id=%s loan_id=%s", merchant_id, loan_id)
@@ -1046,7 +1421,7 @@ class BnplFeatureService:
 
             loan.penalty_accrued_minor += penalty_minor
             loan.outstanding_minor = max(0, loan.outstanding_minor - min(installment.amount_minor, seized_total))
-            loan.status = LoanStatus.OVERDUE if remaining_needed > 0 else LoanStatus.ACTIVE
+            loan.status = LoanStatus.DELINQUENT if remaining_needed > 0 else LoanStatus.PARTIALLY_RECOVERED
             loan.updated_at = _now_utc()
             updated_loan = self._save_loan(loan, merge=False)
 
@@ -1076,6 +1451,15 @@ class BnplFeatureService:
                 notes=notes,
             )
             persisted_log = self._save_liquidation_log(log, merge=False)
+            self._record_ledger_entry(
+                loan_id=updated_loan.loan_id,
+                user_id=updated_loan.user_id,
+                entry_type="PARTIAL_RECOVERY_SEIZURE",
+                amount_minor=seized_total,
+                currency=updated_loan.currency,
+                reference_id=persisted_log.log_id,
+                metadata={"installment_id": installment_id, "needed_minor": needed_minor},
+            )
 
             settlement = self.simulate_merchant_settlement(
                 merchant_id=updated_loan.merchant_id,
@@ -1096,6 +1480,9 @@ class BnplFeatureService:
                     "seized_minor": seized_total,
                     "remaining_needed_minor": remaining_needed,
                 },
+                entity_type="LIQUIDATION",
+                entity_id=persisted_log.log_id,
+                actor_role=initiated_by_role,
             )
             return {
                 "loan": updated_loan.to_firestore(),
@@ -1416,6 +1803,1629 @@ class BnplFeatureService:
             }
         except Exception:
             logger.exception("Failed building public proof page loan_id=%s", loan_id)
+            raise
+
+    def upsert_kyc_status(
+        self,
+        user_id: str,
+        status: str,
+        actor: str,
+        reject_reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create/update KYC lifecycle state for a user profile."""
+        try:
+            user = self._load_user(user_id)
+            try:
+                kyc_status = KycStatus(str(status).strip().upper())
+            except Exception:
+                raise ValueError("Invalid KYC status: {0}".format(status))
+
+            before = user.to_firestore()
+            user.kyc_status = kyc_status
+            user.kyc_last_updated_at = _now_utc()
+            user.kyc_reject_reason = reject_reason if kyc_status == KycStatus.REJECTED else None
+            user.kyc_level = 2 if kyc_status == KycStatus.VERIFIED else max(0, min(user.kyc_level, 1))
+            updated = self._save_user(user)
+            self._record_event(
+                event_type="KYC_STATUS_UPDATED",
+                actor=actor,
+                actor_role=UserRole.SUPPORT.value,
+                entity_type="USER",
+                entity_id=user_id,
+                payload={"user_id": user_id, "kyc_status": kyc_status.value, "reject_reason": reject_reason},
+                before=before,
+                after=updated.to_firestore(),
+            )
+            return {
+                "user_id": user_id,
+                "kyc_status": updated.kyc_status.value,
+                "kyc_level": updated.kyc_level,
+                "kyc_last_updated_at": updated.kyc_last_updated_at,
+                "kyc_reject_reason": updated.kyc_reject_reason,
+            }
+        except Exception:
+            logger.exception("Failed upserting KYC status user_id=%s status=%s", user_id, status)
+            raise
+
+    def get_kyc_status(self, user_id: str) -> Dict[str, Any]:
+        """Get KYC lifecycle details for one user."""
+        try:
+            user = self._load_user(user_id)
+            return {
+                "user_id": user.user_id,
+                "kyc_status": user.kyc_status.value,
+                "kyc_level": user.kyc_level,
+                "kyc_last_updated_at": user.kyc_last_updated_at,
+                "kyc_reject_reason": user.kyc_reject_reason,
+            }
+        except Exception:
+            logger.exception("Failed reading KYC status user_id=%s", user_id)
+            raise
+
+    def run_aml_screening(
+        self,
+        user_id: str,
+        actor: str,
+        provider: str = "mock_sanctions_provider",
+        risk_flags: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Run AML/sanctions screening and persist the result on user profile."""
+        try:
+            user = self._load_user(user_id)
+            normalized_flags = [str(flag).strip().lower() for flag in (risk_flags or []) if str(flag).strip()]
+            if "sanctions" in normalized_flags or "pep" in normalized_flags or "fraud" in normalized_flags:
+                screening_status = ScreeningStatus.BLOCKED
+            elif "watchlist" in normalized_flags or random() < 0.03:
+                screening_status = ScreeningStatus.FLAGGED
+            else:
+                screening_status = ScreeningStatus.CLEARED
+
+            before = user.to_firestore()
+            user.aml_status = screening_status
+            user.aml_last_screened_at = _now_utc()
+            user.aml_screening_reference = "aml_{0}".format(uuid4().hex[:12])
+            updated = self._save_user(user)
+            screening_payload = {
+                "user_id": user_id,
+                "provider": provider,
+                "risk_flags": normalized_flags,
+                "status": screening_status.value,
+                "screened_at": updated.aml_last_screened_at,
+                "reference": updated.aml_screening_reference,
+            }
+            self._record_event(
+                event_type="AML_SCREENING_COMPLETED",
+                actor=actor,
+                entity_type="USER",
+                entity_id=user_id,
+                actor_role=UserRole.SUPPORT.value,
+                payload=screening_payload,
+                before=before,
+                after=updated.to_firestore(),
+            )
+            return screening_payload
+        except Exception:
+            logger.exception("Failed AML screening user_id=%s", user_id)
+            raise
+
+    def get_aml_status(self, user_id: str) -> Dict[str, Any]:
+        """Get AML/sanctions screening status for one user."""
+        try:
+            user = self._load_user(user_id)
+            return {
+                "user_id": user.user_id,
+                "aml_status": user.aml_status.value,
+                "aml_last_screened_at": user.aml_last_screened_at,
+                "aml_screening_reference": user.aml_screening_reference,
+            }
+        except Exception:
+            logger.exception("Failed reading AML status user_id=%s", user_id)
+            raise
+
+    def create_wallet_verification_challenge(self, user_id: str, wallet_id: str, chain: str = "bsc") -> Dict[str, Any]:
+        """Create one-time sign-message challenge for wallet ownership verification."""
+        try:
+            if not Web3.is_address(wallet_id):
+                raise ValueError("Invalid wallet address format.")
+            nonce = secrets.token_hex(16)
+            checksum_wallet = Web3.to_checksum_address(wallet_id)
+            challenge_payload = {
+                "id": "wallet_verify:{0}:{1}".format(user_id, checksum_wallet.lower()),
+                "user_id": user_id,
+                "wallet_id": checksum_wallet,
+                "chain": chain.lower(),
+                "nonce": nonce,
+                "issued_at": _now_utc(),
+                "expires_at": _now_utc() + timedelta(minutes=10),
+                "consumed": False,
+            }
+            message = (
+                "PingMasters wallet verification\n"
+                "user_id={0}\n"
+                "wallet={1}\n"
+                "chain={2}\n"
+                "nonce={3}"
+            ).format(user_id, checksum_wallet, chain.lower(), nonce)
+            challenge_payload["message"] = message
+            self._set_document("settings", challenge_payload["id"], challenge_payload, merge=False)
+            return {
+                "user_id": user_id,
+                "wallet_id": checksum_wallet,
+                "chain": chain.lower(),
+                "message": message,
+                "nonce": nonce,
+                "expires_at": challenge_payload["expires_at"],
+            }
+        except Exception:
+            logger.exception("Failed creating wallet verification challenge user_id=%s wallet=%s", user_id, wallet_id)
+            raise
+
+    def verify_wallet_signature(
+        self,
+        user_id: str,
+        wallet_id: str,
+        signature: str,
+        chain: str = "bsc",
+    ) -> Dict[str, Any]:
+        """Verify signed challenge and mark wallet as verified for collateral operations."""
+        try:
+            checksum_wallet = Web3.to_checksum_address(wallet_id)
+            challenge_id = "wallet_verify:{0}:{1}".format(user_id, checksum_wallet.lower())
+            challenge = self._get_document("settings", challenge_id)
+            if challenge is None:
+                raise ValueError("Wallet verification challenge not found.")
+            if bool(challenge.get("consumed")):
+                raise ValueError("Wallet verification challenge already consumed.")
+            expires_at = challenge.get("expires_at")
+            if isinstance(expires_at, datetime) and expires_at < _now_utc():
+                raise ValueError("Wallet verification challenge is expired.")
+
+            message = str(challenge.get("message", ""))
+            signed = encode_defunct(text=message)
+            recovered_wallet = Web3.to_checksum_address(
+                Web3().eth.account.recover_message(signed, signature=signature)
+            )
+            if recovered_wallet != checksum_wallet:
+                raise ValueError("Signature verification failed for wallet ownership.")
+
+            user = self._load_user(user_id)
+            before = user.to_firestore()
+            if checksum_wallet.lower() not in user.verified_wallets:
+                user.verified_wallets.append(checksum_wallet.lower())
+                user.verified_wallets = sorted(set(user.verified_wallets))
+            user.wallet_verified_at = _now_utc()
+            user.wallet_verification_chain = chain.lower()
+            updated = self._save_user(user)
+            challenge["consumed"] = True
+            challenge["consumed_at"] = _now_utc()
+            self._set_document("settings", challenge_id, challenge, merge=True)
+            self._record_event(
+                event_type="WALLET_VERIFIED",
+                actor=user_id,
+                entity_type="USER",
+                entity_id=user_id,
+                payload={"wallet_id": checksum_wallet, "chain": chain.lower()},
+                before=before,
+                after=updated.to_firestore(),
+            )
+            return {
+                "user_id": user_id,
+                "wallet_id": checksum_wallet,
+                "verified": True,
+                "wallet_verified_at": updated.wallet_verified_at,
+                "verified_wallets": updated.verified_wallets,
+            }
+        except Exception:
+            logger.exception("Failed verifying wallet signature user_id=%s wallet=%s", user_id, wallet_id)
+            raise
+
+    def get_verified_wallets(self, user_id: str) -> Dict[str, Any]:
+        """Get verified wallet list for one user."""
+        try:
+            user = self._load_user(user_id)
+            return {
+                "user_id": user.user_id,
+                "verified_wallets": user.verified_wallets,
+                "wallet_verified_at": user.wallet_verified_at,
+                "wallet_verification_chain": user.wallet_verification_chain,
+            }
+        except Exception:
+            logger.exception("Failed reading verified wallets user_id=%s", user_id)
+            raise
+
+    def list_collateral_asset_policies(self) -> Dict[str, Any]:
+        """List configured collateral asset policies."""
+        try:
+            policies = self._get_setting_value("collateral_asset_policies", self._default_asset_policies())
+            return {"total": len(policies), "policies": policies}
+        except Exception:
+            logger.exception("Failed listing collateral policies.")
+            raise
+
+    def update_collateral_asset_policy(self, asset_symbol: str, policy: Dict[str, Any], actor: str) -> Dict[str, Any]:
+        """Create/update one collateral asset policy."""
+        try:
+            symbol = asset_symbol.strip().upper()
+            if not symbol:
+                raise ValueError("asset_symbol is required.")
+            policies = self._get_setting_value("collateral_asset_policies", self._default_asset_policies())
+            merged_policy = dict(policy)
+            merged_policy["asset_symbol"] = symbol
+            merged_policy.setdefault("enabled", True)
+            merged_policy.setdefault("ltv_bps", 7000)
+            merged_policy.setdefault("liquidation_threshold_bps", 8500)
+            merged_policy.setdefault("liquidation_penalty_bps", 700)
+            merged_policy.setdefault("min_deposit_minor", 1)
+            merged_policy.setdefault("decimals", 18)
+            if int(merged_policy["ltv_bps"]) >= int(merged_policy["liquidation_threshold_bps"]):
+                raise ValueError("ltv_bps must be lower than liquidation_threshold_bps")
+            policies[symbol] = merged_policy
+            self._put_setting_value("collateral_asset_policies", policies, actor=actor)
+            self._record_event(
+                event_type="COLLATERAL_POLICY_UPDATED",
+                actor=actor,
+                actor_role=UserRole.ADMIN.value,
+                entity_type="ASSET_POLICY",
+                entity_id=symbol,
+                payload={"asset_symbol": symbol, "policy": merged_policy},
+            )
+            return merged_policy
+        except Exception:
+            logger.exception("Failed updating collateral policy asset=%s", asset_symbol)
+            raise
+
+    def get_dispute_pause_rules(self) -> Dict[str, Dict[str, Any]]:
+        """Get category-based dispute pause configuration."""
+        defaults: Dict[str, Dict[str, Any]] = {}
+        for category in DisputeCategory:
+            defaults[category.value] = {
+                "pause_penalties": True,
+                "pause_liquidation": True if category.value in RISKY_DISPUTE_CATEGORIES else False,
+                "pause_hours": 168,
+            }
+        return self._get_setting_value("dispute_pause_rules", defaults)
+
+    def update_dispute_pause_rule(
+        self,
+        category: str,
+        pause_penalties: bool,
+        pause_liquidation: bool,
+        pause_hours: int,
+        actor: str,
+    ) -> Dict[str, Any]:
+        """Update dispute pause policy for one category."""
+        try:
+            normalized_category = str(category).strip().upper()
+            if normalized_category not in {item.value for item in DisputeCategory}:
+                raise ValueError("Invalid dispute category: {0}".format(category))
+            if pause_hours <= 0:
+                raise ValueError("pause_hours must be > 0")
+            rules = self.get_dispute_pause_rules()
+            rules[normalized_category] = {
+                "pause_penalties": bool(pause_penalties),
+                "pause_liquidation": bool(pause_liquidation),
+                "pause_hours": int(pause_hours),
+            }
+            self._put_setting_value("dispute_pause_rules", rules, actor=actor)
+            self._record_event(
+                event_type="DISPUTE_PAUSE_RULE_UPDATED",
+                actor=actor,
+                actor_role=UserRole.ADMIN.value,
+                entity_type="DISPUTE_POLICY",
+                entity_id=normalized_category,
+                payload=rules[normalized_category],
+            )
+            return {"category": normalized_category, "rule": rules[normalized_category]}
+        except Exception:
+            logger.exception("Failed updating dispute pause rule category=%s", category)
+            raise
+
+    def add_dispute_evidence(
+        self,
+        dispute_id: str,
+        actor: str,
+        file_name: str,
+        file_url: str,
+        notes: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Attach evidence metadata to an existing dispute."""
+        try:
+            dispute = self._get_document("disputes", dispute_id)
+            if dispute is None:
+                raise ValueError("Dispute not found: {0}".format(dispute_id))
+            evidence = list(dispute.get("evidence", []))
+            evidence_item = {
+                "evidence_id": self._new_id("evd"),
+                "file_name": file_name,
+                "file_url": file_url,
+                "notes": notes,
+                "uploaded_by": actor,
+                "uploaded_at": _now_utc(),
+            }
+            evidence.append(evidence_item)
+            dispute["evidence"] = evidence
+            dispute["updated_at"] = _now_utc()
+            self._set_document("disputes", dispute_id, dispute, merge=True)
+            self._record_event(
+                event_type="DISPUTE_EVIDENCE_ADDED",
+                actor=actor,
+                entity_type="DISPUTE",
+                entity_id=dispute_id,
+                payload={"evidence_id": evidence_item["evidence_id"], "file_name": file_name},
+            )
+            return {"dispute_id": dispute_id, "evidence": evidence_item}
+        except Exception:
+            logger.exception("Failed adding dispute evidence dispute_id=%s", dispute_id)
+            raise
+
+    def get_disputes_by_loan(self, loan_id: str) -> Dict[str, Any]:
+        """List disputes linked to one loan."""
+        try:
+            disputes = self._query_documents("disputes", filters=[("loan_id", "==", loan_id)], order_by="opened_at")
+            return {"loan_id": loan_id, "total": len(disputes), "disputes": disputes}
+        except Exception:
+            logger.exception("Failed listing disputes loan_id=%s", loan_id)
+            raise
+
+    def transition_loan_state(self, loan_id: str, new_status: str, actor: str, reason: str = "") -> Dict[str, Any]:
+        """Transition loan state using explicit backend-enforced state machine."""
+        try:
+            loan = self._load_loan(loan_id)
+            before = loan.to_firestore()
+            target_status = LoanStatus(str(new_status).strip().upper())
+            self._assert_allowed_transition(loan.status, target_status)
+            loan.status = target_status
+            if target_status in {LoanStatus.DISPUTE_OPEN, LoanStatus.DISPUTED} and loan.paused_penalties_until is None:
+                loan.paused_penalties_until = _now_utc() + timedelta(days=7)
+            loan.updated_at = _now_utc()
+            updated = self._save_loan(loan, merge=False)
+            self._record_event(
+                event_type="LOAN_STATE_TRANSITIONED",
+                actor=actor,
+                entity_type="LOAN",
+                entity_id=loan_id,
+                payload={
+                    "loan_id": loan_id,
+                    "from_status": before.get("status"),
+                    "to_status": target_status.value,
+                    "reason": reason,
+                },
+                before=before,
+                after=updated.to_firestore(),
+            )
+            return {"loan_id": loan_id, "from_status": before.get("status"), "to_status": target_status.value}
+        except Exception:
+            logger.exception("Failed transitioning loan state loan_id=%s new_status=%s", loan_id, new_status)
+            raise
+
+    def release_collateral(self, loan_id: str, actor: str) -> Dict[str, Any]:
+        """Release unlocked collateral after closure/refund reconciliation."""
+        try:
+            loan = self._load_loan(loan_id)
+            if loan.status not in {LoanStatus.CLOSED, LoanStatus.CANCELLED, LoanStatus.DEFAULTED}:
+                raise ValueError("Collateral release is allowed only for closed/cancelled/defaulted loans.")
+            collaterals = self._get_collaterals_for_loan(loan_id)
+            releases: List[Dict[str, Any]] = []
+            released_total = 0
+            for collateral in collaterals:
+                available_minor = max(0, collateral.collateral_value_minor - collateral.recovered_minor)
+                if available_minor <= 0:
+                    continue
+                collateral.status = CollateralStatus.RELEASED
+                collateral.recovered_minor += available_minor
+                collateral.updated_at = _now_utc()
+                updated_collateral = self._save_collateral(collateral, merge=False)
+                released_total += available_minor
+                releases.append(
+                    {
+                        "collateral_id": updated_collateral.collateral_id,
+                        "released_minor": available_minor,
+                        "asset_symbol": updated_collateral.asset_symbol,
+                    }
+                )
+            self._record_event(
+                event_type="COLLATERAL_RELEASED",
+                actor=actor,
+                entity_type="LOAN",
+                entity_id=loan_id,
+                payload={"loan_id": loan_id, "released_total_minor": released_total, "releases": releases},
+            )
+            return {"loan_id": loan_id, "released_total_minor": released_total, "releases": releases}
+        except Exception:
+            logger.exception("Failed releasing collateral loan_id=%s", loan_id)
+            raise
+
+    def close_loan(self, loan_id: str, actor: str, force: bool = False) -> Dict[str, Any]:
+        """Close loan when all dues are settled and collateral can be reconciled."""
+        try:
+            loan = self._load_loan(loan_id)
+            if not force and loan.outstanding_minor > 0:
+                raise ValueError("Loan cannot be closed while outstanding amount is pending.")
+            self.transition_loan_state(loan_id=loan_id, new_status=LoanStatus.CLOSED.value, actor=actor, reason="Closure")
+            release = self.release_collateral(loan_id=loan_id, actor=actor)
+            self._record_event(
+                event_type="LOAN_CLOSED",
+                actor=actor,
+                entity_type="LOAN",
+                entity_id=loan_id,
+                payload={"loan_id": loan_id, "force": force, "release_summary": release},
+            )
+            return {"loan_id": loan_id, "status": LoanStatus.CLOSED.value, "release": release}
+        except Exception:
+            logger.exception("Failed closing loan loan_id=%s", loan_id)
+            raise
+
+    def cancel_pre_settlement_order(self, loan_id: str, actor: str, reason: str) -> Dict[str, Any]:
+        """Cancel pre-settlement loan/order and free reserved collateral."""
+        try:
+            loan = self._load_loan(loan_id)
+            orders = self._query_documents("orders", filters=[("loan_id", "==", loan_id)], order_by="created_at")
+            if not orders:
+                raise ValueError("No order exists for loan: {0}".format(loan_id))
+            order = dict(orders[-1])
+            settlement_status = str(order.get("settlement_status", SettlementStatus.PENDING.value)).upper()
+            if settlement_status not in {SettlementStatus.PENDING.value, SettlementStatus.PROCESSING.value}:
+                raise ValueError("Order can only be cancelled before settlement is finalized.")
+            order["status"] = "CANCELLED"
+            order["settlement_status"] = SettlementStatus.REVERSED.value
+            order["cancel_reason"] = reason
+            order["updated_at"] = _now_utc()
+            order_id = str(order.get("id") or order.get("order_id"))
+            self._set_document("orders", order_id, order, merge=True)
+            self.transition_loan_state(loan_id=loan.loan_id, new_status=LoanStatus.CANCELLED.value, actor=actor, reason=reason)
+            release = self.release_collateral(loan_id=loan.loan_id, actor=actor)
+            self._record_event(
+                event_type="PRE_SETTLEMENT_ORDER_CANCELLED",
+                actor=actor,
+                entity_type="ORDER",
+                entity_id=order_id,
+                payload={"loan_id": loan_id, "order_id": order_id, "reason": reason},
+            )
+            return {"loan_id": loan_id, "order": order, "release": release}
+        except Exception:
+            logger.exception("Failed cancelling pre-settlement order loan_id=%s", loan_id)
+            raise
+
+    def apply_refund_adjustment(
+        self,
+        loan_id: str,
+        actor: str,
+        refund_amount_minor: int,
+        reason: str,
+    ) -> Dict[str, Any]:
+        """Apply merchant refund against principal/outstanding and recompute schedule."""
+        try:
+            if refund_amount_minor <= 0:
+                raise ValueError("refund_amount_minor must be > 0")
+            loan = self._load_loan(loan_id)
+            before = loan.to_firestore()
+            adjustment = min(int(refund_amount_minor), int(loan.outstanding_minor))
+            loan.outstanding_minor = max(0, loan.outstanding_minor - adjustment)
+            loan.principal_minor = max(0, loan.principal_minor - adjustment)
+            loan.updated_at = _now_utc()
+            if loan.outstanding_minor == 0:
+                loan.status = LoanStatus.CLOSED
+            updated_loan = self._save_loan(loan, merge=False)
+            installments = self._get_installments_for_loan(loan_id)
+            remaining_installments = [item for item in installments if item.status != InstallmentStatus.PAID]
+            if remaining_installments:
+                deduction_per_installment = adjustment // len(remaining_installments)
+                remainder = adjustment % len(remaining_installments)
+                for item in remaining_installments:
+                    deduction = deduction_per_installment + (1 if remainder > 0 else 0)
+                    remainder = max(0, remainder - 1)
+                    item.amount_minor = max(0, item.amount_minor - deduction)
+                    item.updated_at = _now_utc()
+                    self._save_installment(item, merge=False)
+            self._record_ledger_entry(
+                loan_id=loan_id,
+                user_id=loan.user_id,
+                entry_type="REFUND_ADJUSTMENT",
+                amount_minor=adjustment,
+                currency=loan.currency,
+                metadata={"reason": reason},
+            )
+            self._record_event(
+                event_type="LOAN_REFUND_ADJUSTED",
+                actor=actor,
+                entity_type="LOAN",
+                entity_id=loan_id,
+                payload={"refund_amount_minor": refund_amount_minor, "applied_minor": adjustment, "reason": reason},
+                before=before,
+                after=updated_loan.to_firestore(),
+            )
+            response = {"loan": updated_loan.to_firestore(), "refund_applied_minor": adjustment}
+            if updated_loan.status == LoanStatus.CLOSED:
+                response["release"] = self.release_collateral(loan_id=loan_id, actor=actor)
+            return response
+        except Exception:
+            logger.exception("Failed applying refund adjustment loan_id=%s", loan_id)
+            raise
+
+    def _persist_payment_attempt(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Store payment attempt details."""
+        payment_id = str(payload.get("payment_attempt_id") or self._new_id("pay"))
+        payload["payment_attempt_id"] = payment_id
+        payload.setdefault("created_at", _now_utc())
+        payload["updated_at"] = _now_utc()
+        self._set_document("payments", payment_id, payload, merge=False)
+        return payload
+
+    def _load_installment(self, installment_id: str) -> InstallmentModel:
+        """Load installment by identifier."""
+        payload = self._get_document("installments", installment_id)
+        if payload is None:
+            raise ValueError("Installment not found: {0}".format(installment_id))
+        return InstallmentModel.from_firestore(payload, doc_id=installment_id)
+
+    def pay_installment(
+        self,
+        loan_id: str,
+        installment_id: str,
+        amount_minor: int,
+        actor: str,
+        payment_ref: Optional[str] = None,
+        success: bool = True,
+        failure_reason: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Pay one installment and update schedule/loan balances."""
+        try:
+            cached = self._check_idempotency("pay_installment", idempotency_key=idempotency_key)
+            if cached is not None:
+                return cached
+            if amount_minor <= 0:
+                raise ValueError("amount_minor must be > 0")
+            loan = self._load_loan(loan_id)
+            installment = self._load_installment(installment_id)
+            if installment.loan_id != loan_id:
+                raise ValueError("installment does not belong to loan.")
+            pending_minor = max(
+                0,
+                installment.amount_minor + installment.late_fee_minor - installment.paid_minor,
+            )
+            paid_minor = min(pending_minor, int(amount_minor))
+            payment_attempt = self._persist_payment_attempt(
+                {
+                    "loan_id": loan_id,
+                    "installment_id": installment_id,
+                    "user_id": loan.user_id,
+                    "amount_minor": int(amount_minor),
+                    "paid_minor": int(paid_minor if success else 0),
+                    "currency": loan.currency,
+                    "status": "SUCCESS" if success else "FAILED",
+                    "failure_reason": failure_reason,
+                    "payment_ref": payment_ref,
+                    "retry_count": 0,
+                }
+            )
+            if not success:
+                self._record_event(
+                    event_type="INSTALLMENT_PAYMENT_FAILED",
+                    actor=actor,
+                    entity_type="INSTALLMENT",
+                    entity_id=installment_id,
+                    payload={
+                        "loan_id": loan_id,
+                        "installment_id": installment_id,
+                        "failure_reason": failure_reason,
+                        "payment_attempt_id": payment_attempt["payment_attempt_id"],
+                    },
+                )
+                response = {
+                    "payment_attempt": payment_attempt,
+                    "loan": loan.to_firestore(),
+                    "installment": installment.to_firestore(),
+                }
+                self._store_idempotency("pay_installment", idempotency_key=idempotency_key, response=response)
+                return response
+
+            installment.paid_minor += int(paid_minor)
+            installment.paid_at = _now_utc()
+            installment.payment_ref = payment_ref or payment_attempt["payment_attempt_id"]
+            installment.status = (
+                InstallmentStatus.PAID
+                if installment.paid_minor >= installment.amount_minor + installment.late_fee_minor
+                else InstallmentStatus.DUE
+            )
+            installment.updated_at = _now_utc()
+            updated_installment = self._save_installment(installment, merge=False)
+
+            loan.paid_minor += int(paid_minor)
+            loan.outstanding_minor = max(0, loan.outstanding_minor - int(paid_minor))
+            if loan.outstanding_minor == 0:
+                loan.status = LoanStatus.CLOSED
+            elif loan.status in {LoanStatus.OVERDUE, LoanStatus.GRACE, LoanStatus.DELINQUENT}:
+                loan.status = LoanStatus.ACTIVE
+            loan.updated_at = _now_utc()
+            updated_loan = self._save_loan(loan, merge=False)
+            self._record_ledger_entry(
+                loan_id=loan_id,
+                user_id=loan.user_id,
+                entry_type="INSTALLMENT_PAYMENT",
+                amount_minor=int(paid_minor),
+                currency=loan.currency,
+                reference_id=payment_attempt["payment_attempt_id"],
+                metadata={"installment_id": installment_id},
+            )
+            if updated_installment.status == InstallmentStatus.PAID and self._user_repository is not None:
+                user = self._load_user(loan.user_id)
+                user.on_time_payment_count += 1
+                self._save_user(user)
+
+            response: Dict[str, Any] = {
+                "payment_attempt": payment_attempt,
+                "loan": updated_loan.to_firestore(),
+                "installment": updated_installment.to_firestore(),
+            }
+            if updated_loan.status == LoanStatus.CLOSED:
+                response["release"] = self.release_collateral(loan_id=loan_id, actor=actor)
+            self._record_event(
+                event_type="INSTALLMENT_PAYMENT_SUCCESS",
+                actor=actor,
+                entity_type="INSTALLMENT",
+                entity_id=installment_id,
+                payload={
+                    "loan_id": loan_id,
+                    "installment_id": installment_id,
+                    "paid_minor": int(paid_minor),
+                    "payment_attempt_id": payment_attempt["payment_attempt_id"],
+                },
+            )
+            self._store_idempotency("pay_installment", idempotency_key=idempotency_key, response=response)
+            return response
+        except Exception:
+            logger.exception("Failed paying installment loan_id=%s installment_id=%s", loan_id, installment_id)
+            raise
+
+    def pay_now(
+        self,
+        loan_id: str,
+        amount_minor: int,
+        actor: str,
+        payment_ref: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Apply a pay-now amount across due/unpaid installments in sequence."""
+        try:
+            cached = self._check_idempotency("pay_now", idempotency_key=idempotency_key)
+            if cached is not None:
+                return cached
+            if amount_minor <= 0:
+                raise ValueError("amount_minor must be > 0")
+            self._load_loan(loan_id)
+            remaining = int(amount_minor)
+            payment_results: List[Dict[str, Any]] = []
+            for installment in self._get_installments_for_loan(loan_id):
+                if remaining <= 0:
+                    break
+                if installment.status == InstallmentStatus.PAID:
+                    continue
+                pending = max(0, installment.amount_minor + installment.late_fee_minor - installment.paid_minor)
+                if pending <= 0:
+                    continue
+                applied = min(remaining, pending)
+                result = self.pay_installment(
+                    loan_id=loan_id,
+                    installment_id=installment.installment_id,
+                    amount_minor=applied,
+                    actor=actor,
+                    payment_ref=payment_ref,
+                    success=True,
+                )
+                payment_results.append(result)
+                remaining -= applied
+            updated_loan = self._load_loan(loan_id)
+            response = {
+                "loan": updated_loan.to_firestore(),
+                "paid_minor": int(amount_minor - remaining),
+                "unapplied_minor": int(remaining),
+                "payment_results": payment_results,
+            }
+            self._store_idempotency("pay_now", idempotency_key=idempotency_key, response=response)
+            return response
+        except Exception:
+            logger.exception("Failed pay-now flow loan_id=%s", loan_id)
+            raise
+
+    def retry_failed_payment(self, loan_id: str, installment_id: str, actor: str) -> Dict[str, Any]:
+        """Retry last failed payment attempt for one installment."""
+        try:
+            attempts = self._query_documents(
+                "payments",
+                filters=[
+                    ("loan_id", "==", loan_id),
+                    ("installment_id", "==", installment_id),
+                    ("status", "==", "FAILED"),
+                ],
+                order_by="created_at",
+            )
+            if not attempts:
+                raise ValueError("No failed payment attempts found for this installment.")
+            last_attempt = dict(attempts[-1])
+            retry_count = int(last_attempt.get("retry_count", 0)) + 1
+            amount_minor = int(last_attempt.get("amount_minor", 0))
+            if amount_minor <= 0:
+                raise ValueError("Invalid amount in previous failed attempt.")
+            result = self.pay_installment(
+                loan_id=loan_id,
+                installment_id=installment_id,
+                amount_minor=amount_minor,
+                actor=actor,
+                payment_ref=str(last_attempt.get("payment_ref") or ""),
+                success=True,
+            )
+            last_attempt["retry_count"] = retry_count
+            last_attempt["retry_completed_at"] = _now_utc()
+            payment_attempt_id = str(last_attempt.get("id") or last_attempt.get("payment_attempt_id"))
+            self._set_document("payments", payment_attempt_id, last_attempt, merge=True)
+            return {"retry_count": retry_count, "result": result}
+        except Exception:
+            logger.exception("Failed retrying payment loan_id=%s installment_id=%s", loan_id, installment_id)
+            raise
+
+    def process_razorpay_webhook(
+        self,
+        event_type: str,
+        payload: Dict[str, Any],
+        signature: str,
+        raw_body: str,
+    ) -> Dict[str, Any]:
+        """Process Razorpay webhooks with signature validation and idempotency."""
+        try:
+            secret = str(self._settings.razorpay_key_secret or "")
+            if not secret:
+                raise ValueError("Razorpay key secret is not configured.")
+            computed_signature = hmac.new(
+                secret.encode("utf-8"),
+                raw_body.encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+            if not hmac.compare_digest(computed_signature, signature):
+                raise ValueError("Invalid Razorpay webhook signature.")
+
+            event_id = str(payload.get("event_id") or payload.get("id") or self._new_id("wbh"))
+            idempotency_cached = self._check_idempotency("razorpay_webhook", idempotency_key=event_id)
+            if idempotency_cached is not None:
+                return {"processed": True, "idempotent_replay": True, "result": idempotency_cached}
+
+            data_object = payload.get("payload", {}).get("payment", {}).get("entity", {})
+            order_id = str(data_object.get("order_id") or "")
+            if order_id:
+                order = self._get_document("orders", order_id)
+                if order is not None:
+                    if event_type in {"payment.captured", "order.paid"}:
+                        order["settlement_status"] = SettlementStatus.PAID.value
+                        order["status"] = "PAID_UPFRONT"
+                    elif event_type in {"payment.failed"}:
+                        order["settlement_status"] = SettlementStatus.FAILED.value
+                        order["status"] = "SETTLEMENT_FAILED"
+                    order["updated_at"] = _now_utc()
+                    self._set_document("orders", order_id, order, merge=True)
+
+            webhook_record = {
+                "webhook_id": event_id,
+                "event_type": event_type,
+                "payload": payload,
+                "processed_at": _now_utc(),
+                "signature_verified": True,
+            }
+            self._set_document("settings", "razorpay_webhook:{0}".format(event_id), webhook_record, merge=False)
+            self._record_event(
+                event_type="RAZORPAY_WEBHOOK_PROCESSED",
+                actor="razorpay",
+                entity_type="WEBHOOK",
+                entity_id=event_id,
+                payload={"event_type": event_type, "order_id": order_id},
+            )
+            response = {"processed": True, "event_id": event_id, "order_id": order_id}
+            self._store_idempotency("razorpay_webhook", idempotency_key=event_id, response=response)
+            return response
+        except Exception:
+            logger.exception("Failed processing Razorpay webhook event_type=%s", event_type)
+            raise
+
+    def apply_late_fee(self, loan_id: str, installment_id: str, actor: str) -> Dict[str, Any]:
+        """Apply late fee after grace expiry and update loan penalty ledger."""
+        try:
+            preview = self.preview_late_fee(loan_id=loan_id, installment_id=installment_id)
+            late_fee_minor = int(preview.get("late_fee_minor", 0))
+            if late_fee_minor <= 0:
+                return {"loan_id": loan_id, "installment_id": installment_id, "late_fee_applied_minor": 0}
+            loan = self._load_loan(loan_id)
+            installment = self._load_installment(installment_id)
+            installment.late_fee_minor = late_fee_minor
+            installment.status = InstallmentStatus.MISSED
+            installment.updated_at = _now_utc()
+            updated_installment = self._save_installment(installment, merge=False)
+            loan.penalty_accrued_minor += late_fee_minor
+            loan.status = LoanStatus.GRACE if preview.get("in_grace", False) else LoanStatus.OVERDUE
+            loan.updated_at = _now_utc()
+            updated_loan = self._save_loan(loan, merge=False)
+            ledger = self._record_ledger_entry(
+                loan_id=loan_id,
+                user_id=loan.user_id,
+                entry_type="LATE_FEE_APPLIED",
+                amount_minor=late_fee_minor,
+                currency=loan.currency,
+                reference_id=installment_id,
+            )
+            self._record_event(
+                event_type="LATE_FEE_APPLIED",
+                actor=actor,
+                entity_type="INSTALLMENT",
+                entity_id=installment_id,
+                payload={"loan_id": loan_id, "late_fee_minor": late_fee_minor},
+            )
+            return {
+                "loan": updated_loan.to_firestore(),
+                "installment": updated_installment.to_firestore(),
+                "late_fee_applied_minor": late_fee_minor,
+                "ledger_entry": ledger,
+            }
+        except Exception:
+            logger.exception("Failed applying late fee loan_id=%s installment_id=%s", loan_id, installment_id)
+            raise
+
+    def waive_late_fee(self, loan_id: str, installment_id: str, actor: str, reason: str) -> Dict[str, Any]:
+        """Waive/reverse applied late fee after dispute or manual review."""
+        try:
+            loan = self._load_loan(loan_id)
+            installment = self._load_installment(installment_id)
+            waived_minor = int(max(0, installment.late_fee_minor))
+            installment.late_fee_minor = 0
+            installment.updated_at = _now_utc()
+            updated_installment = self._save_installment(installment, merge=False)
+            loan.penalty_accrued_minor = max(0, loan.penalty_accrued_minor - waived_minor)
+            loan.updated_at = _now_utc()
+            updated_loan = self._save_loan(loan, merge=False)
+            ledger = self._record_ledger_entry(
+                loan_id=loan_id,
+                user_id=loan.user_id,
+                entry_type="LATE_FEE_WAIVED",
+                amount_minor=waived_minor,
+                currency=loan.currency,
+                reference_id=installment_id,
+                metadata={"reason": reason},
+            )
+            self._record_event(
+                event_type="LATE_FEE_WAIVED",
+                actor=actor,
+                entity_type="INSTALLMENT",
+                entity_id=installment_id,
+                payload={"loan_id": loan_id, "waived_minor": waived_minor, "reason": reason},
+            )
+            return {"loan": updated_loan.to_firestore(), "installment": updated_installment.to_firestore(), "ledger_entry": ledger}
+        except Exception:
+            logger.exception("Failed waiving late fee loan_id=%s installment_id=%s", loan_id, installment_id)
+            raise
+
+    def schedule_reminders(self, loan_id: str, actor: str) -> Dict[str, Any]:
+        """Schedule due-date, grace expiry, and delinquency reminders."""
+        try:
+            loan = self._load_loan(loan_id)
+            installments = self._get_installments_for_loan(loan_id)
+            reminders: List[Dict[str, Any]] = []
+            for item in installments:
+                if item.status == InstallmentStatus.PAID:
+                    continue
+                due_reminder = {
+                    "reminder_id": self._new_id("rmn"),
+                    "loan_id": loan_id,
+                    "installment_id": item.installment_id,
+                    "user_id": loan.user_id,
+                    "type": "PRE_DUE",
+                    "scheduled_at": item.due_at - timedelta(days=1),
+                    "status": "PENDING",
+                    "message": "Your installment is due soon.",
+                    "created_at": _now_utc(),
+                    "updated_at": _now_utc(),
+                }
+                grace_reminder = {
+                    "reminder_id": self._new_id("rmn"),
+                    "loan_id": loan_id,
+                    "installment_id": item.installment_id,
+                    "user_id": loan.user_id,
+                    "type": "GRACE_EXPIRY",
+                    "scheduled_at": item.grace_deadline or (item.due_at + timedelta(hours=loan.grace_window_hours)),
+                    "status": "PENDING",
+                    "message": "Grace period expires soon. Pay now to avoid additional penalties.",
+                    "created_at": _now_utc(),
+                    "updated_at": _now_utc(),
+                }
+                for reminder in [due_reminder, grace_reminder]:
+                    self._set_document("reminders", reminder["reminder_id"], reminder, merge=False)
+                    reminders.append(reminder)
+            self._record_event(
+                event_type="REMINDERS_SCHEDULED",
+                actor=actor,
+                entity_type="LOAN",
+                entity_id=loan_id,
+                payload={"loan_id": loan_id, "scheduled_count": len(reminders)},
+            )
+            return {"loan_id": loan_id, "scheduled_count": len(reminders), "reminders": reminders}
+        except Exception:
+            logger.exception("Failed scheduling reminders loan_id=%s", loan_id)
+            raise
+
+    def send_notification(
+        self,
+        user_id: str,
+        channels: List[str],
+        template: str,
+        context: Dict[str, Any],
+        actor: str = "system",
+    ) -> Dict[str, Any]:
+        """Create notification records using channel-agnostic template payloads."""
+        try:
+            notification_id = self._new_id("ntf")
+            payload = {
+                "notification_id": notification_id,
+                "user_id": user_id,
+                "channels": [str(channel).strip().lower() for channel in channels if str(channel).strip()],
+                "template": template,
+                "context": context,
+                "status": "SENT",
+                "delivery_attempts": 1,
+                "created_at": _now_utc(),
+                "updated_at": _now_utc(),
+            }
+            self._set_document("notifications", notification_id, payload, merge=False)
+            self._record_event(
+                event_type="NOTIFICATION_SENT",
+                actor=actor,
+                entity_type="NOTIFICATION",
+                entity_id=notification_id,
+                payload={"user_id": user_id, "channels": payload["channels"], "template": template},
+            )
+            return payload
+        except Exception:
+            logger.exception("Failed sending notification user_id=%s template=%s", user_id, template)
+            raise
+
+    def run_due_reminders(self, actor: str = "scheduler") -> Dict[str, Any]:
+        """Execute due reminder jobs and log delivery attempts."""
+        try:
+            now = _now_utc()
+            reminders = self._query_documents("reminders", filters=[("status", "==", "PENDING")], order_by="scheduled_at")
+            sent: List[Dict[str, Any]] = []
+            for reminder in reminders:
+                scheduled_at = reminder.get("scheduled_at")
+                if isinstance(scheduled_at, datetime) and scheduled_at > now:
+                    continue
+                user_id = str(reminder.get("user_id"))
+                notification = self.send_notification(
+                    user_id=user_id,
+                    channels=["email", "whatsapp", "push"],
+                    template=str(reminder.get("type", "REMINDER")),
+                    context={
+                        "loan_id": reminder.get("loan_id"),
+                        "installment_id": reminder.get("installment_id"),
+                        "message": reminder.get("message"),
+                    },
+                    actor=actor,
+                )
+                reminder["status"] = "SENT"
+                reminder["sent_at"] = _now_utc()
+                reminder["updated_at"] = _now_utc()
+                reminder_id = str(reminder.get("id") or reminder.get("reminder_id"))
+                self._set_document("reminders", reminder_id, reminder, merge=True)
+                sent.append({"reminder_id": reminder_id, "notification_id": notification["notification_id"]})
+            return {"processed": len(sent), "deliveries": sent}
+        except Exception:
+            logger.exception("Failed running due reminders.")
+            raise
+
+    def resolve_oracle_price(self, max_age_sec: int = 300, block_on_stale: bool = True) -> Dict[str, Any]:
+        """Resolve price from primary source with fallback and stale guard."""
+        try:
+            prices = self._protocol_service.get_prices()
+            age = self._oracle_age_sec()
+            fallback = self._get_setting_value("oracle_fallback_prices", {"usd_price": 30000, "inr_price": 2500000})
+            stale = age is None or age > max_age_sec
+            if stale and block_on_stale:
+                return {
+                    "healthy": False,
+                    "stale": True,
+                    "reason": "Oracle data is stale.",
+                    "age_sec": age,
+                    "max_age_sec": max_age_sec,
+                    "selected": "none",
+                }
+            if stale:
+                return {
+                    "healthy": True,
+                    "stale": True,
+                    "selected": "fallback",
+                    "prices": fallback,
+                    "age_sec": age,
+                    "max_age_sec": max_age_sec,
+                }
+            return {"healthy": True, "stale": False, "selected": "primary", "prices": prices, "age_sec": age}
+        except Exception:
+            logger.exception("Failed resolving oracle price.")
+            raise
+
+    def run_portfolio_risk_monitor(self, threshold_ratio: float = 1.05) -> Dict[str, Any]:
+        """Scan active portfolio loans and flag unhealthy positions."""
+        try:
+            loans = self._query_documents(
+                "loans",
+                filters=[("status", "in", [LoanStatus.ACTIVE.value, LoanStatus.GRACE.value, LoanStatus.OVERDUE.value, LoanStatus.DELINQUENT.value])],
+            )
+            flagged: List[Dict[str, Any]] = []
+            for payload in loans:
+                loan = LoanModel.from_firestore(payload, doc_id=payload.get("id"))
+                meter = self.get_safety_meter(loan.loan_id)
+                health_factor = float(meter.get("health_factor", 0.0))
+                if health_factor <= threshold_ratio:
+                    loan.status = LoanStatus.DELINQUENT
+                    loan.updated_at = _now_utc()
+                    self._save_loan(loan, merge=False)
+                    warning = {
+                        "loan_id": loan.loan_id,
+                        "user_id": loan.user_id,
+                        "health_factor": health_factor,
+                        "status": loan.status.value,
+                    }
+                    flagged.append(warning)
+                    self.send_notification(
+                        user_id=loan.user_id,
+                        channels=["email", "push"],
+                        template="RISK_TOPUP_ALERT",
+                        context=warning,
+                    )
+            self._record_event(
+                event_type="PORTFOLIO_RISK_MONITOR_RUN",
+                actor="risk_monitor",
+                entity_type="PORTFOLIO",
+                entity_id="bnpl",
+                payload={"scanned_loans": len(loans), "flagged_loans": len(flagged), "threshold_ratio": threshold_ratio},
+            )
+            return {"scanned_loans": len(loans), "flagged_loans": len(flagged), "flags": flagged}
+        except Exception:
+            logger.exception("Failed running portfolio risk monitor.")
+            raise
+
+    def execute_full_liquidation(self, loan_id: str, actor_role: str, notes: str) -> Dict[str, Any]:
+        """Escalate to full liquidation and record residual bad debt if any."""
+        try:
+            loan = self._load_loan(loan_id)
+            collaterals = self._get_collaterals_for_loan(loan_id)
+            total_available = sum(max(0, item.collateral_value_minor - item.recovered_minor) for item in collaterals)
+            needed_minor = int(loan.outstanding_minor + loan.penalty_accrued_minor)
+            seized_minor = min(total_available, needed_minor)
+            residual_bad_debt_minor = max(0, needed_minor - seized_minor)
+            for collateral in collaterals:
+                available = max(0, collateral.collateral_value_minor - collateral.recovered_minor)
+                if available <= 0:
+                    continue
+                collateral.recovered_minor += available
+                collateral.status = CollateralStatus.PARTIALLY_RECOVERED
+                collateral.updated_at = _now_utc()
+                self._save_collateral(collateral, merge=False)
+            loan.outstanding_minor = residual_bad_debt_minor
+            loan.status = LoanStatus.DEFAULTED if residual_bad_debt_minor > 0 else LoanStatus.CLOSED
+            loan.updated_at = _now_utc()
+            updated_loan = self._save_loan(loan, merge=False)
+            liquidation_log = LiquidationLogModel(
+                log_id=self._new_id("liq"),
+                loan_id=loan.loan_id,
+                user_id=loan.user_id,
+                collateral_id=collaterals[0].collateral_id if collaterals else "NA",
+                triggered_at=_now_utc(),
+                trigger_reason="FULL_LIQUIDATION_ESCALATION",
+                health_factor_at_trigger=float(self.get_safety_meter(loan_id).get("health_factor", 0.0)),
+                missed_amount_minor=int(loan.outstanding_minor),
+                penalty_minor=int(loan.penalty_accrued_minor),
+                needed_minor=needed_minor,
+                seized_minor=seized_minor,
+                returned_minor=0,
+                merchant_transfer_ref="full_liq_{0}".format(uuid4().hex[:8]),
+                tx_hash="0x{0}".format(uuid4().hex),
+                action_type=LiquidationActionType.FULL_RECOVERY,
+                initiated_by_role=actor_role,
+                policy_version="v1",
+                notes=notes,
+            )
+            persisted_log = self._save_liquidation_log(liquidation_log, merge=False)
+            self._record_ledger_entry(
+                loan_id=loan.loan_id,
+                user_id=loan.user_id,
+                entry_type="FULL_LIQUIDATION",
+                amount_minor=seized_minor,
+                currency=loan.currency,
+                reference_id=persisted_log.log_id,
+                metadata={"residual_bad_debt_minor": residual_bad_debt_minor},
+            )
+            self._record_event(
+                event_type="FULL_LIQUIDATION_EXECUTED",
+                actor=actor_role,
+                actor_role=actor_role,
+                entity_type="LOAN",
+                entity_id=loan_id,
+                payload={
+                    "loan_id": loan_id,
+                    "needed_minor": needed_minor,
+                    "seized_minor": seized_minor,
+                    "residual_bad_debt_minor": residual_bad_debt_minor,
+                },
+            )
+            return {
+                "loan": updated_loan.to_firestore(),
+                "liquidation_log": persisted_log.to_firestore(),
+                "residual_bad_debt_minor": residual_bad_debt_minor,
+            }
+        except Exception:
+            logger.exception("Failed executing full liquidation loan_id=%s", loan_id)
+            raise
+
+    def compute_merchant_risk_score(self, merchant_id: str) -> Dict[str, Any]:
+        """Compute merchant-side risk score using dispute/refund/settlement signals."""
+        try:
+            orders = self._query_documents("orders", filters=[("merchant_id", "==", merchant_id)])
+            disputes = self._query_documents("disputes", filters=[("merchant_id", "==", merchant_id)])
+            total_orders = max(1, len(orders))
+            failed_settlements = len(
+                [item for item in orders if str(item.get("settlement_status", "")).upper() == SettlementStatus.FAILED.value]
+            )
+            refund_count = len([item for item in orders if str(item.get("status", "")).upper() == "REFUNDED"])
+            dispute_rate = float(len(disputes)) / float(total_orders)
+            settlement_failure_rate = float(failed_settlements) / float(total_orders)
+            refund_rate = float(refund_count) / float(total_orders)
+            score = max(0.0, 1.0 - min(1.0, (dispute_rate * 0.5) + (settlement_failure_rate * 0.3) + (refund_rate * 0.2)))
+            tier = "LOW"
+            if score < 0.4:
+                tier = "HIGH"
+            elif score < 0.7:
+                tier = "MEDIUM"
+            return {
+                "merchant_id": merchant_id,
+                "merchant_risk_score": round(score, 4),
+                "risk_tier": tier,
+                "signals": {
+                    "dispute_rate": round(dispute_rate, 4),
+                    "settlement_failure_rate": round(settlement_failure_rate, 4),
+                    "refund_rate": round(refund_rate, 4),
+                    "orders_total": len(orders),
+                },
+            }
+        except Exception:
+            logger.exception("Failed computing merchant risk score merchant_id=%s", merchant_id)
+            raise
+
+    def run_fraud_checks(
+        self,
+        user_id: str,
+        wallet_id: Optional[str] = None,
+        device_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Run heuristic fraud checks and store abuse flags for review."""
+        try:
+            flags: List[str] = []
+            user_loans = self._query_documents("loans", filters=[("user_id", "==", user_id)])
+            recent_loans = [
+                item
+                for item in user_loans
+                if isinstance(item.get("created_at"), datetime)
+                and (item["created_at"] >= (_now_utc() - timedelta(hours=1)))
+            ]
+            if len(recent_loans) >= 3:
+                flags.append("rapid_purchase_attempts")
+            if wallet_id:
+                wallet_lower = wallet_id.strip().lower()
+                if not Web3.is_address(wallet_id):
+                    flags.append("invalid_wallet_format")
+                if self._user_repository is not None:
+                    for other_user in self._user_repository.get_active_users():
+                        if other_user.user_id == user_id:
+                            continue
+                        if wallet_lower in (other_user.verified_wallets or []):
+                            flags.append("duplicate_wallet_across_users")
+                            break
+            if device_id and len(device_id.strip()) < 8:
+                flags.append("suspicious_device_id")
+            status = "BLOCKED" if len(flags) >= 2 else ("FLAGGED" if flags else "CLEAR")
+            fraud_payload = {
+                "flag_id": self._new_id("frd"),
+                "user_id": user_id,
+                "wallet_id": wallet_id,
+                "device_id": device_id,
+                "flags": flags,
+                "status": status,
+                "created_at": _now_utc(),
+                "updated_at": _now_utc(),
+            }
+            self._set_document("fraud_flags", fraud_payload["flag_id"], fraud_payload, merge=False)
+            self._record_event(
+                event_type="FRAUD_CHECK_EXECUTED",
+                actor="fraud_engine",
+                entity_type="USER",
+                entity_id=user_id,
+                payload={"flags": flags, "status": status},
+            )
+            return fraud_payload
+        except Exception:
+            logger.exception("Failed running fraud checks user_id=%s", user_id)
+            raise
+
+    def list_ledger_entries(
+        self,
+        loan_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        limit: int = 200,
+    ) -> Dict[str, Any]:
+        """List ledger entries by loan/user for reproducible financial views."""
+        try:
+            filters: List[FilterTuple] = []
+            if loan_id:
+                filters.append(("loan_id", "==", loan_id))
+            if user_id:
+                filters.append(("user_id", "==", user_id))
+            rows = self._query_documents("ledger", filters=filters or None, order_by="created_at", limit=max(1, min(limit, 1000)))
+            return {"total": len(rows), "entries": rows}
+        except Exception:
+            logger.exception("Failed listing ledger entries loan_id=%s user_id=%s", loan_id, user_id)
+            raise
+
+    def compute_kpis(self) -> Dict[str, Any]:
+        """Compute product/risk KPI metrics for dashboard reporting."""
+        try:
+            loans = self._query_documents("loans")
+            orders = self._query_documents("orders")
+            disputes = self._query_documents("disputes")
+            liquidation_logs = self._query_documents("liquidation_logs")
+            total_loans = max(1, len(loans))
+            approved_count = len(
+                [item for item in loans if str(item.get("status")) not in {LoanStatus.CANCELLED.value, LoanStatus.PENDING_KYC.value}]
+            )
+            default_count = len([item for item in loans if str(item.get("status")) == LoanStatus.DEFAULTED.value])
+            overdue_count = len([item for item in loans if str(item.get("status")) in {LoanStatus.OVERDUE.value, LoanStatus.DELINQUENT.value}])
+            refunded_count = len([item for item in orders if str(item.get("status", "")).upper() == "REFUNDED"])
+            failed_settlements = len([item for item in orders if str(item.get("settlement_status", "")).upper() == SettlementStatus.FAILED.value])
+            metrics = {
+                "approval_rate": round(float(approved_count) / float(total_loans), 4),
+                "default_rate": round(float(default_count) / float(total_loans), 4),
+                "late_fee_rate": round(float(overdue_count) / float(total_loans), 4),
+                "refund_rate": round(float(refunded_count) / float(max(1, len(orders))), 4),
+                "dispute_rate": round(float(len(disputes)) / float(total_loans), 4),
+                "liquidation_rate": round(float(len(liquidation_logs)) / float(total_loans), 4),
+                "settlement_success_rate": round(
+                    float(max(0, len(orders) - failed_settlements)) / float(max(1, len(orders))),
+                    4,
+                ),
+                "counts": {
+                    "loans": len(loans),
+                    "orders": len(orders),
+                    "disputes": len(disputes),
+                    "liquidations": len(liquidation_logs),
+                },
+            }
+            return metrics
+        except Exception:
+            logger.exception("Failed computing KPI metrics.")
+            raise
+
+    def enqueue_job(self, job_type: str, payload: Dict[str, Any], run_at: Optional[datetime], actor: str) -> Dict[str, Any]:
+        """Add asynchronous job record for deferred execution."""
+        try:
+            job_id = self._new_id("job")
+            job_payload = {
+                "job_id": job_id,
+                "job_type": job_type,
+                "payload": payload,
+                "run_at": run_at or _now_utc(),
+                "status": "PENDING",
+                "attempt_count": 0,
+                "created_at": _now_utc(),
+                "updated_at": _now_utc(),
+            }
+            self._set_document("jobs", job_id, job_payload, merge=False)
+            self._record_event(
+                event_type="JOB_ENQUEUED",
+                actor=actor,
+                entity_type="JOB",
+                entity_id=job_id,
+                payload={"job_type": job_type},
+            )
+            return job_payload
+        except Exception:
+            logger.exception("Failed enqueuing job job_type=%s", job_type)
+            raise
+
+    def run_due_jobs(self, actor: str = "scheduler") -> Dict[str, Any]:
+        """Execute due async jobs for retries/reminders/risk scans."""
+        try:
+            now = _now_utc()
+            rows = self._query_documents("jobs", filters=[("status", "==", "PENDING")], order_by="run_at")
+            processed: List[Dict[str, Any]] = []
+            for row in rows:
+                run_at = row.get("run_at")
+                if isinstance(run_at, datetime) and run_at > now:
+                    continue
+                job_type = str(row.get("job_type", "")).upper()
+                payload = row.get("payload", {})
+                result: Any = None
+                if job_type == "REMINDER_SCAN":
+                    result = self.run_due_reminders(actor=actor)
+                elif job_type == "RISK_SCAN":
+                    result = self.run_portfolio_risk_monitor()
+                elif job_type == "SETTLEMENT_RETRY":
+                    order_id = str(payload.get("order_id", ""))
+                    result = self.manual_retry_settlement(order_id=order_id, actor=actor)
+                elif job_type == "PAYMENT_RETRY":
+                    result = self.retry_failed_payment(
+                        loan_id=str(payload.get("loan_id")),
+                        installment_id=str(payload.get("installment_id")),
+                        actor=actor,
+                    )
+                else:
+                    result = {"status": "SKIPPED", "reason": "Unsupported job type"}
+                row["status"] = "DONE"
+                row["attempt_count"] = int(row.get("attempt_count", 0)) + 1
+                row["result"] = result
+                row["updated_at"] = _now_utc()
+                job_id = str(row.get("id") or row.get("job_id"))
+                self._set_document("jobs", job_id, row, merge=True)
+                processed.append({"job_id": job_id, "job_type": job_type, "result": result})
+            return {"processed": len(processed), "jobs": processed}
+        except Exception:
+            logger.exception("Failed running due jobs.")
+            raise
+
+    def check_rate_limit(self, key: str, limit: int, window_sec: int) -> Dict[str, Any]:
+        """Apply simple in-memory rate limit state for API abuse throttling."""
+        try:
+            normalized_key = key.strip().lower()
+            now_ts = int(_now_utc().timestamp())
+            entry = self._rate_limit_cache.get(normalized_key, {"count": 0, "window_start": now_ts})
+            elapsed = now_ts - int(entry.get("window_start", now_ts))
+            if elapsed >= window_sec:
+                entry = {"count": 0, "window_start": now_ts}
+            entry["count"] = int(entry.get("count", 0)) + 1
+            self._rate_limit_cache[normalized_key] = entry
+            allowed = entry["count"] <= limit
+            return {
+                "allowed": allowed,
+                "count": entry["count"],
+                "limit": limit,
+                "window_sec": window_sec,
+                "retry_after_sec": max(0, window_sec - (now_ts - entry["window_start"])),
+            }
+        except Exception:
+            logger.exception("Failed rate-limit evaluation key=%s", key)
+            raise
+
+    def onboard_merchant(self, merchant_name: str, actor: str) -> Dict[str, Any]:
+        """Create merchant profile and API credentials for merchant platform APIs."""
+        try:
+            merchant_id = self._new_id("mrc")
+            api_key = "pm_{0}".format(secrets.token_urlsafe(24))
+            merchant_payload = {
+                "merchant_id": merchant_id,
+                "name": merchant_name,
+                "status": MerchantStatus.ACTIVE.value,
+                "api_key": api_key,
+                "created_at": _now_utc(),
+                "updated_at": _now_utc(),
+                "is_deleted": False,
+            }
+            self._set_document("merchants", merchant_id, merchant_payload, merge=False)
+            self._record_event(
+                event_type="MERCHANT_ONBOARDED",
+                actor=actor,
+                actor_role=UserRole.ADMIN.value,
+                entity_type="MERCHANT",
+                entity_id=merchant_id,
+                payload={"merchant_name": merchant_name},
+            )
+            return merchant_payload
+        except Exception:
+            logger.exception("Failed onboarding merchant name=%s", merchant_name)
+            raise
+
+    def validate_merchant_api_key(self, merchant_id: str, api_key: str) -> Dict[str, Any]:
+        """Validate merchant API key and lifecycle status."""
+        try:
+            merchant = self._get_document("merchants", merchant_id)
+            if merchant is None:
+                raise ValueError("Merchant not found.")
+            is_active = str(merchant.get("status", "")).upper() == MerchantStatus.ACTIVE.value
+            is_valid_key = hmac.compare_digest(str(merchant.get("api_key", "")), str(api_key))
+            return {"merchant_id": merchant_id, "valid": bool(is_active and is_valid_key), "active": is_active}
+        except Exception:
+            logger.exception("Failed validating merchant api key merchant_id=%s", merchant_id)
+            raise
+
+    def update_merchant_order_status(self, order_id: str, status: str, actor: str, notes: Optional[str] = None) -> Dict[str, Any]:
+        """Sync merchant order fulfillment status updates."""
+        try:
+            order = self._get_document("orders", order_id)
+            if order is None:
+                raise ValueError("Order not found.")
+            normalized = str(status).strip().upper()
+            allowed = {"ORDER_CREATED", "FULFILLED", "CANCELLED", "REFUNDED", "FAILED"}
+            if normalized not in allowed:
+                raise ValueError("Unsupported order status: {0}".format(status))
+            order["status"] = normalized
+            if normalized == "FAILED":
+                order["settlement_status"] = SettlementStatus.FAILED.value
+            if normalized == "REFUNDED":
+                order["settlement_status"] = SettlementStatus.REVERSED.value
+            order["notes"] = notes
+            order["updated_at"] = _now_utc()
+            self._set_document("orders", order_id, order, merge=True)
+            self._record_event(
+                event_type="MERCHANT_ORDER_STATUS_UPDATED",
+                actor=actor,
+                entity_type="ORDER",
+                entity_id=order_id,
+                payload={"status": normalized, "notes": notes},
+            )
+            return order
+        except Exception:
+            logger.exception("Failed updating merchant order status order_id=%s", order_id)
+            raise
+
+    def list_merchant_settlements(self, merchant_id: str) -> Dict[str, Any]:
+        """List settlement lifecycle records for one merchant."""
+        try:
+            orders = self._query_documents("orders", filters=[("merchant_id", "==", merchant_id)], order_by="created_at")
+            lifecycle = {}
+            for order in orders:
+                settlement_status = str(order.get("settlement_status", SettlementStatus.PENDING.value))
+                lifecycle[settlement_status] = lifecycle.get(settlement_status, 0) + 1
+            return {"merchant_id": merchant_id, "total": len(orders), "lifecycle": lifecycle, "orders": orders}
+        except Exception:
+            logger.exception("Failed listing merchant settlements merchant_id=%s", merchant_id)
+            raise
+
+    def manual_waive_penalty(self, loan_id: str, installment_id: str, actor: str, reason: str) -> Dict[str, Any]:
+        """Manual override to waive penalty during support review."""
+        return self.waive_late_fee(loan_id=loan_id, installment_id=installment_id, actor=actor, reason=reason)
+
+    def manual_force_close(self, loan_id: str, actor: str, reason: str) -> Dict[str, Any]:
+        """Manual override to force-close a loan after support/admin review."""
+        try:
+            response = self.close_loan(loan_id=loan_id, actor=actor, force=True)
+            self._record_event(
+                event_type="MANUAL_FORCE_CLOSE_EXECUTED",
+                actor=actor,
+                actor_role=UserRole.ADMIN.value,
+                entity_type="LOAN",
+                entity_id=loan_id,
+                payload={"reason": reason},
+            )
+            return response
+        except Exception:
+            logger.exception("Failed manual force close loan_id=%s", loan_id)
+            raise
+
+    def manual_retry_settlement(self, order_id: str, actor: str) -> Dict[str, Any]:
+        """Manual override to retry failed settlement records."""
+        try:
+            order = self._get_document("orders", order_id)
+            if order is None:
+                raise ValueError("Order not found.")
+            if str(order.get("settlement_status", "")).upper() != SettlementStatus.FAILED.value:
+                raise ValueError("Settlement retry is allowed only for failed settlements.")
+            order["settlement_status"] = SettlementStatus.PROCESSING.value
+            order["status"] = "RETRYING"
+            order["updated_at"] = _now_utc()
+            self._set_document("orders", order_id, order, merge=True)
+            self._record_event(
+                event_type="MANUAL_SETTLEMENT_RETRY_TRIGGERED",
+                actor=actor,
+                actor_role=UserRole.SUPPORT.value,
+                entity_type="ORDER",
+                entity_id=order_id,
+                payload={"order_id": order_id},
+            )
+            return order
+        except Exception:
+            logger.exception("Failed manual settlement retry order_id=%s", order_id)
+            raise
+
+    def _get_next_due_at(self, loan_id: str) -> Optional[datetime]:
+        """Resolve next unpaid installment due date for one loan."""
+        installments = self._get_installments_for_loan(loan_id)
+        due_candidates = [item.due_at for item in installments if item.status != InstallmentStatus.PAID]
+        if not due_candidates:
+            return None
+        return min(due_candidates)
+
+    def list_user_loans(self, user_id: str, include_closed: bool = True) -> Dict[str, Any]:
+        """Return user loans for dashboard cards."""
+        try:
+            loans = self._query_documents("loans", filters=[("user_id", "==", user_id)], order_by="created_at")
+            if not include_closed:
+                loans = [
+                    item
+                    for item in loans
+                    if str(item.get("status")) not in {LoanStatus.CLOSED.value, LoanStatus.CANCELLED.value}
+                ]
+            summaries = []
+            for row in loans:
+                summaries.append(
+                    {
+                        "loan_id": row.get("loan_id"),
+                        "status": row.get("status"),
+                        "principal_minor": row.get("principal_minor"),
+                        "outstanding_minor": row.get("outstanding_minor"),
+                        "next_due_at": self._get_next_due_at(str(row.get("loan_id"))),
+                        "currency": row.get("currency"),
+                    }
+                )
+            return {"user_id": user_id, "total": len(summaries), "loans": summaries}
+        except Exception:
+            logger.exception("Failed listing user loans user_id=%s", user_id)
+            raise
+
+    def get_loan_detail(self, loan_id: str) -> Dict[str, Any]:
+        """Get complete loan detail for user-facing loan screen."""
+        try:
+            loan = self._load_loan(loan_id)
+            meter = self.get_safety_meter(loan_id)
+            disputes = self._query_documents("disputes", filters=[("loan_id", "==", loan_id)], order_by="opened_at")
+            installments = self._get_installments_for_loan(loan_id)
+            fees_minor = int(loan.penalty_accrued_minor)
+            return {
+                "loan": loan.to_firestore(),
+                "next_due_at": self._get_next_due_at(loan_id),
+                "collateral_locked_minor": meter.get("collateral_value_minor"),
+                "health_factor": meter.get("health_factor"),
+                "dispute_status": disputes[-1].get("status") if disputes else None,
+                "fees_minor": fees_minor,
+                "installment_count": len(installments),
+            }
+        except Exception:
+            logger.exception("Failed getting loan detail loan_id=%s", loan_id)
+            raise
+
+    def get_installment_history(self, loan_id: str) -> Dict[str, Any]:
+        """Get installment schedule and status history for one loan."""
+        try:
+            installments = self._get_installments_for_loan(loan_id)
+            rows = [item.to_firestore() for item in installments]
+            return {"loan_id": loan_id, "total": len(rows), "installments": rows}
+        except Exception:
+            logger.exception("Failed getting installment history loan_id=%s", loan_id)
+            raise
+
+    def get_payment_history(self, loan_id: str, limit: int = 200) -> Dict[str, Any]:
+        """Get payment timeline including retries and failure reasons."""
+        try:
+            rows = self._query_documents(
+                "payments",
+                filters=[("loan_id", "==", loan_id)],
+                order_by="created_at",
+                limit=max(1, min(limit, 1000)),
+            )
+            return {"loan_id": loan_id, "total": len(rows), "payments": rows}
+        except Exception:
+            logger.exception("Failed getting payment history loan_id=%s", loan_id)
+            raise
+
+    def ops_dashboard(self) -> Dict[str, Any]:
+        """Return consolidated back-office snapshot for admins/support."""
+        try:
+            loans = self._query_documents("loans")
+            disputes = self._query_documents("disputes")
+            failed_payments = self._query_documents("payments", filters=[("status", "==", "FAILED")], limit=100)
+            pause_state = self.get_pause_state()
+            return {
+                "counts": {
+                    "users": len(self._user_repository.get_active_users()) if self._user_repository is not None else 0,
+                    "loans": len(loans),
+                    "disputes_open": len([item for item in disputes if str(item.get("status")) == "OPEN"]),
+                    "failed_payments": len(failed_payments),
+                },
+                "pause_state": pause_state,
+                "kpis": self.compute_kpis(),
+                "recent_failed_payments": failed_payments[:20],
+            }
+        except Exception:
+            logger.exception("Failed building ops dashboard.")
             raise
 
     def validate_oracle_guard(self, max_age_sec: int = 300) -> Dict[str, Any]:

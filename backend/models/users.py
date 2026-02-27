@@ -7,7 +7,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field, validator
 
 from .base import BaseDocumentModel
-from .enums import UserStatus
+from .enums import KycStatus, ScreeningStatus, UserRole, UserStatus
 
 
 logger = logging.getLogger(__name__)
@@ -32,8 +32,18 @@ class UserModel(BaseDocumentModel):
     autopay_enabled: bool = Field(default=False)
     notification_channels: List[str] = Field(default_factory=list)
     status: UserStatus = Field(default=UserStatus.ACTIVE)
+    role: UserRole = Field(default=UserRole.USER)
     kyc_level: int = Field(default=0, ge=0, le=3)
+    kyc_status: KycStatus = Field(default=KycStatus.NOT_STARTED)
+    kyc_last_updated_at: Optional[datetime] = Field(default=None)
+    kyc_reject_reason: Optional[str] = Field(default=None)
+    aml_status: ScreeningStatus = Field(default=ScreeningStatus.NOT_SCREENED)
+    aml_last_screened_at: Optional[datetime] = Field(default=None)
+    aml_screening_reference: Optional[str] = Field(default=None)
     wallet_address: List[WalletAddressModel] = Field(default_factory=list)
+    verified_wallets: List[str] = Field(default_factory=list)
+    wallet_verified_at: Optional[datetime] = Field(default=None)
+    wallet_verification_chain: Optional[str] = Field(default=None)
     on_time_payment_count: int = Field(default=0, ge=0)
     late_payment_count: int = Field(default=0, ge=0)
     top_up_count: int = Field(default=0, ge=0)
@@ -61,6 +71,16 @@ class UserModel(BaseDocumentModel):
             return value or []
         except Exception:
             logger.exception("Failed to normalize wallet_address payload.")
+            return []
+
+    @validator("verified_wallets", pre=True, always=True)
+    def _normalize_verified_wallets(cls, value: Optional[List[str]]) -> List[str]:
+        """Normalize verified wallet list to lowercase unique values."""
+        try:
+            wallets = [str(wallet).strip().lower() for wallet in (value or []) if str(wallet).strip()]
+            return sorted(set(wallets))
+        except Exception:
+            logger.exception("Failed to normalize verified_wallets payload.")
             return []
 
     @validator("currency_code")

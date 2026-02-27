@@ -4,10 +4,16 @@ from .base import BaseDocumentModel, Money, PercentageBps
 from .collaterals import CollateralModel
 from .enums import (
     CollateralStatus,
+    DisputeCategory,
     InstallmentStatus,
+    KycStatus,
     LiquidationActionType,
     LoanStatus,
+    MerchantStatus,
     RiskTier,
+    ScreeningStatus,
+    SettlementStatus,
+    UserRole,
     UserStatus,
 )
 from .exceptions import ModelError, ModelNotFoundError, ModelValidationError, VersionConflictError
@@ -42,6 +48,12 @@ __all__ = [
     "RiskTier",
     "InstallmentStatus",
     "LiquidationActionType",
+    "UserRole",
+    "KycStatus",
+    "ScreeningStatus",
+    "DisputeCategory",
+    "MerchantStatus",
+    "SettlementStatus",
     "ModelError",
     "ModelValidationError",
     "ModelNotFoundError",

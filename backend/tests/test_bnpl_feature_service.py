@@ -151,6 +151,52 @@ class BnplFeatureServiceTests(unittest.TestCase):
         self.assertEqual(int(loan["installment_count"]), 4)
         self.assertEqual(int(loan["tenure_days"]), 60)
 
+    def test_idempotent_plan_creation_replay(self) -> None:
+        """Same idempotency key should return the original plan response."""
+        first = self.service.create_bnpl_plan(
+            user_id="usr_401",
+            merchant_id="mer_501",
+            principal_minor=20000,
+            currency="INR",
+            installment_count=4,
+            tenure_days=120,
+            ltv_bps=7000,
+            danger_limit_bps=8000,
+            liquidation_threshold_bps=9000,
+            grace_window_hours=24,
+            late_fee_flat_minor=100,
+            late_fee_bps=200,
+            idempotency_key="idem_plan_123",
+        )
+        second = self.service.create_bnpl_plan(
+            user_id="usr_401",
+            merchant_id="mer_501",
+            principal_minor=20000,
+            currency="INR",
+            installment_count=4,
+            tenure_days=120,
+            ltv_bps=7000,
+            danger_limit_bps=8000,
+            liquidation_threshold_bps=9000,
+            grace_window_hours=24,
+            late_fee_flat_minor=100,
+            late_fee_bps=200,
+            idempotency_key="idem_plan_123",
+        )
+        self.assertEqual(first["loan"]["loan_id"], second["loan"]["loan_id"])
+
+    def test_invalid_state_transition_rejected(self) -> None:
+        """State machine should reject invalid transitions."""
+        plan = self._create_plan()
+        loan_id = plan["loan"]["loan_id"]
+        with self.assertRaises(ValueError):
+            self.service.transition_loan_state(
+                loan_id=loan_id,
+                new_status="CANCELLED",
+                actor="tester",
+                reason="invalid from active",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
