@@ -6,6 +6,7 @@ from typing import Optional, Union
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, ValidationError
 
+from common import convert_currency_amount
 from core import FirebaseClientManager, Web3ClientManager
 from core.config import AppSettings
 from models.exceptions import ModelNotFoundError, VersionConflictError
@@ -22,6 +23,8 @@ class UserFromFirebaseCreateRequest(BaseModel):
     user_id: str = Field(..., min_length=3)
     wallet_address: list[WalletAddressModel] = Field(default_factory=list)
     notification_channels: list[str] = Field(default_factory=list)
+    currency_code: str = Field(default="INR", min_length=3, max_length=3)
+    currency_symbol: str = Field(default="Rs", min_length=1, max_length=3)
     autopay_enabled: bool = Field(default=False)
     kyc_level: int = Field(default=0, ge=0, le=3)
 
@@ -125,6 +128,30 @@ def build_router(settings: AppSettings) -> APIRouter:
         """Return service health status for probes and monitors."""
         return {"status": "ok"}
 
+    @router.get("/currency/convert", summary="Convert amount to target currency")
+    def currency_convert(amount: float, from_currency: str, to_currency: str) -> dict:
+        """Convert amount using configured public currency API."""
+        try:
+            return convert_currency_amount(
+                amount=amount,
+                from_currency=from_currency,
+                to_currency=to_currency,
+                api_base_url=settings.currency_api_base_url,
+                timeout_sec=settings.currency_api_timeout_sec,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+        except Exception as exc:
+            logger.exception(
+                "Currency convert endpoint failed amount=%s from=%s to=%s",
+                amount,
+                from_currency,
+                to_currency,
+            )
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
     @router.get("/settings", summary="Settings snapshot")
     def get_settings_snapshot() -> dict[str, Union[str, bool, int]]:
         """Expose non-sensitive settings useful for local verification."""
@@ -176,6 +203,8 @@ def build_router(settings: AppSettings) -> APIRouter:
                 email=email,
                 phone=phone,
                 full_name=full_name,
+                currency_code=payload.currency_code,
+                currency_symbol=payload.currency_symbol,
                 wallet_address=payload.wallet_address,
                 notification_channels=payload.notification_channels,
                 autopay_enabled=payload.autopay_enabled,

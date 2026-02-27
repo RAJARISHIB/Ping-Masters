@@ -1,0 +1,42 @@
+app:
+  name: "Ping Masters API"
+  debug: true
+  host: "127.0.0.1"
+  port: 8000
+
+firebase:
+  enabled: true
+  project_id: "pingmasters-e90a2"
+  credentials_path: "D:\\projects\\Ping-Masters\\backend\\firebase_private.json"
+  users_collection: "test_users"
+  profile_collection: "user"
+
+web3:
+  enabled: false
+  bsc_rpc_url: "https://data-seed-prebsc-1-s1.binance.org:8545/"
+  opbnb_rpc_url: "https://opbnb-testnet-rpc.bnbchain.org"
+  contract_abi_json: []
+  bsc_contract_address: ""
+  opbnb_contract_address: ""
+  read_function: "getValue"
+
+liquidator:
+  enabled: false
+  rpc_url: "https://data-seed-prebsc-1-s1.binance.org:8545/"
+  contract_address: ""
+  contract_abi_json: []
+  private_key: ""
+  address: ""
+  poll_interval_sec: 10
+  health_threshold: 1.0
+  chain_id: 97
+  gas_limit: 2000000
+  gas_price_gwei: 10
+  price_function: "getBNBPrice"
+  health_function: "getHealthFactor"
+  execute_function: "liquidate"
+  borrowers: []
+
+currency_api:
+  base_url: "https://api.frankfurter.app"
+  timeout_sec: 10

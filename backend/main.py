@@ -5,6 +5,7 @@ import uvicorn
 
 from api.router import build_router
 from core import get_logger, load_settings, setup_logging
+from services import LiquidationPoller
 
 
 setup_logging()
@@ -16,6 +17,26 @@ def create_app() -> FastAPI:
     settings = load_settings()
     app = FastAPI(title=settings.app_name, debug=settings.debug)
     app.include_router(build_router(settings))
+
+    poller = LiquidationPoller(settings=settings)
+    app.state.liquidation_poller = poller
+
+    @app.on_event("startup")
+    async def _startup_background_services() -> None:
+        """Start background services on application startup."""
+        try:
+            await app.state.liquidation_poller.start()
+        except Exception:
+            logger.exception("Failed to start background services during startup.")
+
+    @app.on_event("shutdown")
+    async def _shutdown_background_services() -> None:
+        """Stop background services on application shutdown."""
+        try:
+            await app.state.liquidation_poller.stop()
+        except Exception:
+            logger.exception("Failed to stop background services during shutdown.")
+
     logger.info("Application initialized: %s", settings.app_name)
     return app
 

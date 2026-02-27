@@ -25,6 +25,7 @@ class ModelValidationTests(unittest.TestCase):
             email="test@example.com",
             phone="9999999999",
             full_name="Test User",
+            currency_code="inr",
             notification_channels=["Email", "whatsapp", "email"],
             wallet_address=[
                 {"name": "Primary", "wallet_id": "0x1234567890"},
@@ -32,6 +33,7 @@ class ModelValidationTests(unittest.TestCase):
             ],
         )
         self.assertEqual(user.user_id, "usr_1")
+        self.assertEqual(user.currency_code, "INR")
         self.assertEqual(user.notification_channels, ["email", "whatsapp"])
         self.assertEqual(user.wallet_address[0].name, "Primary")
 
@@ -155,9 +157,12 @@ class ModelValidationTests(unittest.TestCase):
             email="u2@example.com",
             phone="8888888888",
             full_name="User Two",
+            currency_code="USD",
+            currency_symbol="$",
         )
         user_copy = UserModel.from_firestore(user.to_firestore(), doc_id="doc_u2")
         self.assertEqual(user_copy.id, "doc_u2")
+        self.assertEqual(user_copy.currency_code, "USD")
 
         loan = LoanModel(
             loan_id="loan_rt",
