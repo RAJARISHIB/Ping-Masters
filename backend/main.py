@@ -1,6 +1,7 @@
 """Application entrypoint for the Ping Masters FastAPI backend."""
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from api.router import build_router
@@ -16,6 +17,18 @@ def create_app() -> FastAPI:
     """Create and configure a FastAPI application instance."""
     settings = load_settings()
     app = FastAPI(title=settings.app_name, debug=settings.debug)
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:4200",
+            "http://127.0.0.1:4200",
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     app.include_router(build_router(settings))
 
     poller = LiquidationPoller(settings=settings)
