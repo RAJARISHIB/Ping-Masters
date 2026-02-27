@@ -1,0 +1,346 @@
+{
+	"compiler": {
+		"version": "0.8.31+commit.fd3a2265"
+	},
+	"language": "Solidity",
+	"output": {
+		"abi": [
+			{
+				"inputs": [
+					{
+						"internalType": "uint256",
+						"name": "initialUSDPrice",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "initialINRPrice",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "nonpayable",
+				"type": "constructor"
+			},
+			{
+				"inputs": [],
+				"name": "InvalidPrice",
+				"type": "error"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "uint256",
+						"name": "lastUpdated",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "maxAge",
+						"type": "uint256"
+					}
+				],
+				"name": "StalePrice",
+				"type": "error"
+			},
+			{
+				"inputs": [],
+				"name": "Unauthorized",
+				"type": "error"
+			},
+			{
+				"anonymous": false,
+				"inputs": [
+					{
+						"indexed": true,
+						"internalType": "address",
+						"name": "previousOwner",
+						"type": "address"
+					},
+					{
+						"indexed": true,
+						"internalType": "address",
+						"name": "newOwner",
+						"type": "address"
+					}
+				],
+				"name": "OwnershipTransferred",
+				"type": "event"
+			},
+			{
+				"anonymous": false,
+				"inputs": [
+					{
+						"indexed": true,
+						"internalType": "enum PriceConsumer.Currency",
+						"name": "currency",
+						"type": "uint8"
+					},
+					{
+						"indexed": false,
+						"internalType": "uint256",
+						"name": "oldPrice",
+						"type": "uint256"
+					},
+					{
+						"indexed": false,
+						"internalType": "uint256",
+						"name": "newPrice",
+						"type": "uint256"
+					},
+					{
+						"indexed": false,
+						"internalType": "uint256",
+						"name": "timestamp",
+						"type": "uint256"
+					}
+				],
+				"name": "PriceUpdated",
+				"type": "event"
+			},
+			{
+				"inputs": [],
+				"name": "DECIMALS",
+				"outputs": [
+					{
+						"internalType": "uint8",
+						"name": "",
+						"type": "uint8"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "decimals",
+				"outputs": [
+					{
+						"internalType": "uint8",
+						"name": "",
+						"type": "uint8"
+					}
+				],
+				"stateMutability": "pure",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "getBothPrices",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "usdPrice",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "inrPrice",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "enum PriceConsumer.Currency",
+						"name": "currency",
+						"type": "uint8"
+					}
+				],
+				"name": "getLatestPrice",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "enum PriceConsumer.Currency",
+						"name": "currency",
+						"type": "uint8"
+					},
+					{
+						"internalType": "uint256",
+						"name": "maxAge",
+						"type": "uint256"
+					}
+				],
+				"name": "getLatestPrice",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "uint8",
+						"name": "",
+						"type": "uint8"
+					}
+				],
+				"name": "lastUpdatedAt",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "owner",
+				"outputs": [
+					{
+						"internalType": "address",
+						"name": "",
+						"type": "address"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "address",
+						"name": "newOwner",
+						"type": "address"
+					}
+				],
+				"name": "transferOwnership",
+				"outputs": [],
+				"stateMutability": "nonpayable",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "uint256",
+						"name": "newUSDPrice",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "newINRPrice",
+						"type": "uint256"
+					}
+				],
+				"name": "updateBothPrices",
+				"outputs": [],
+				"stateMutability": "nonpayable",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "enum PriceConsumer.Currency",
+						"name": "currency",
+						"type": "uint8"
+					},
+					{
+						"internalType": "uint256",
+						"name": "newPrice",
+						"type": "uint256"
+					}
+				],
+				"name": "updatePrice",
+				"outputs": [],
+				"stateMutability": "nonpayable",
+				"type": "function"
+			}
+		],
+		"devdoc": {
+			"kind": "dev",
+			"methods": {
+				"constructor": {
+					"params": {
+						"initialINRPrice": "e.g. 2_500_000_000_000  for Rs25000  (8 decimals)",
+						"initialUSDPrice": "e.g. 30_000_000_000  for $300.00  (8 decimals)"
+					}
+				},
+				"getBothPrices()": {
+					"returns": {
+						"inrPrice": " BNB/INR with 8 decimals.",
+						"usdPrice": " BNB/USD with 8 decimals."
+					}
+				},
+				"getLatestPrice(uint8,uint256)": {
+					"params": {
+						"currency": "Currency.USD or Currency.INR.",
+						"maxAge": "Max seconds since last update; 0 = skip check."
+					}
+				}
+			},
+			"title": "PriceConsumer",
+			"version": 1
+		},
+		"userdoc": {
+			"kind": "user",
+			"methods": {
+				"getBothPrices()": {
+					"notice": "Returns both prices in one call — saves gas for the monitoring bot."
+				},
+				"getLatestPrice(uint8)": {
+					"notice": "Convenience overload — no staleness check."
+				},
+				"getLatestPrice(uint8,uint256)": {
+					"notice": "Get BNB price for a specific currency with optional staleness check."
+				},
+				"lastUpdatedAt(uint8)": {
+					"notice": "Last update timestamp per currency (0=USD, 1=INR)."
+				},
+				"updateBothPrices(uint256,uint256)": {
+					"notice": "Update both prices atomically — preferred so the bot refreshes         USD and INR in the same block to avoid cross-currency arbitrage."
+				},
+				"updatePrice(uint8,uint256)": {
+					"notice": "Update a single currency price."
+				}
+			},
+			"notice": "Dual-currency BNB/USD and BNB/INR price oracle for Ping-Masters.         Deployed on BNB Smart Chain Testnet.  PRICE DECIMAL CONVENTION  (8 decimals, same as Chainlink)   USD  $300.00     ->  30_000_000_000      (3e10)   INR  Rs25000.00  ->  2_500_000_000_000   (2.5e12)  The FastAPI bot calls updateBothPrices() every ~3 seconds so both feeds  stay in sync with BSC block times.  The Currency enum is defined here so LendingEngine can reference  PriceConsumer.Currency without a separate types file.",
+			"version": 1
+		}
+	},
+	"settings": {
+		"compilationTarget": {
+			"contracts/src/PriceConsumer.sol": "PriceConsumer"
+		},
+		"evmVersion": "osaka",
+		"libraries": {},
+		"metadata": {
+			"bytecodeHash": "ipfs"
+		},
+		"optimizer": {
+			"enabled": false,
+			"runs": 200
+		},
+		"remappings": []
+	},
+	"sources": {
+		"contracts/src/PriceConsumer.sol": {
+			"keccak256": "0xd7c444ea52d6f48bf3f0fb34bc7b163aa0aaef4c13bd3181100cb7b8eb164623",
+			"license": "MIT",
+			"urls": [
+				"bzz-raw://d49dab48d712592731bd80b93c410fddeb324c0a30d08dca2cafb9daf252eb69",
+				"dweb:/ipfs/QmbShgMnzxdDxsvfMAat6tt9FcCnaZQSgZKHZWDM4nboSv"
+			]
+		}
+	},
+	"version": 1
+}
