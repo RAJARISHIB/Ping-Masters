@@ -1,0 +1,263 @@
+<div *ngIf="loading" class="h-screen w-screen flex flex-col items-center justify-center gap-3">
+    <span class="text-sm text-gray-500">Loading loan details from backend...</span>
+</div>
+
+<div class="loan-page" *ngIf="!loading && loan; else notFound">
+
+    <!-- Header -->
+    <header class="loan-header flex items-center justify-between px-8 py-3">
+        <div class="flex items-center gap-4">
+            <button class="back-btn flex items-center justify-center w-9 h-9 rounded-full hover:bg-gray-100 transition-colors duration-150"
+                (click)="goBack()">
+                <i class="fa-solid fa-arrow-left text-gray-600 text-sm"></i>
+            </button>
+            <!-- Editable Title -->
+            <div class="flex items-center gap-2">
+                <ng-container *ngIf="!isEditingTitle; else editMode">
+                    <span class="text-xl font-semibold text-gray-800">{{ loan.title }}</span>
+                    <button class="edit-btn flex items-center justify-center w-7 h-7 rounded-full hover:bg-gray-100 transition-colors duration-150"
+                        (click)="startEdit()">
+                        <i class="fa-solid fa-pen text-gray-400 text-xs"></i>
+                    </button>
+                </ng-container>
+                <ng-template #editMode>
+                    <input
+                        class="title-input text-xl font-semibold text-gray-800 border-b-2 border-blue-500 outline-none bg-transparent px-1"
+                        [(ngModel)]="editedTitle"
+                        (keyup.enter)="saveTitle()"
+                        (blur)="saveTitle()"
+                        autofocus />
+                </ng-template>
+            </div>
+        </div>
+        <div class="flex items-center">
+            <app-navbar></app-navbar>
+        </div>
+    </header>
+
+    <!-- Main -->
+    <main class="loan-main px-8 py-6 flex gap-6">
+
+        <!-- Left Column -->
+        <div class="flex flex-col gap-5 flex-1 min-w-0">
+
+            <!-- Collateral Card -->
+            <div class="loan-card">
+                <div class="card-header">
+                    <span class="card-label">Collateral</span>
+                    <span class="asset-badge">{{ loan.collateralAsset }}</span>
+                </div>
+                <div class="grid grid-cols-2 gap-4 p-5">
+                    <!-- Amount -->
+                    <div class="col-span-2 flex items-baseline gap-2 pb-4 border-b border-gray-100">
+                        <span class="text-3xl font-semibold text-gray-900">{{ loan.collateralAmount }}</span>
+                        <span class="text-lg font-medium text-gray-500">{{ loan.collateralAsset }}</span>
+                    </div>
+                    <!-- Entry Price -->
+                    <div class="stat-cell">
+                        <span class="stat-label">Entry Price</span>
+                        <span class="stat-value">${{ loan.entryPrice.toFixed(2) }}</span>
+                    </div>
+                    <!-- Current Price -->
+                    <div class="stat-cell">
+                        <span class="stat-label">Current Price</span>
+                        <div class="flex items-center gap-2">
+                            <span class="stat-value">${{ loan.currentPrice.toFixed(2) }}</span>
+                            <span class="price-delta"
+                                [class.delta-up]="priceChange >= 0"
+                                [class.delta-down]="priceChange < 0">
+                                {{ priceChange >= 0 ? '+' : '' }}{{ priceChange.toFixed(1) }}%
+                            </span>
+                        </div>
+                    </div>
+                    <!-- Liquidation Price -->
+                    <div class="stat-cell">
+                        <span class="stat-label">Liquidation Price</span>
+                        <span class="stat-value text-red-500">${{ loan.liquidationPrice.toFixed(2) }}</span>
+                    </div>
+                    <!-- Safety Margin -->
+                    <div class="stat-cell">
+                        <span class="stat-label">Safety Margin</span>
+                        <span class="stat-value" [class.text-green-600]="marginFromLiquidation > 30"
+                            [class.text-yellow-600]="marginFromLiquidation >= 15 && marginFromLiquidation <= 30"
+                            [class.text-red-600]="marginFromLiquidation < 15">
+                            {{ marginFromLiquidation.toFixed(1) }}% above liq.
+                        </span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Installment Progress -->
+            <div class="loan-card">
+                <div class="card-header">
+                    <span class="card-label">Installments</span>
+                    <div class="flex items-center gap-3">
+                        <span class="text-xs text-gray-500">{{ loan.paidInstallments }}/{{ loan.totalInstallments }} paid</span>
+                        <button *ngIf="pendingInstallment && razorpayAvailable && !isPayingInstallment"
+                            class="pay-now-btn"
+                            (click)="openRazorpay()">
+                            <i class="fa-solid fa-bolt text-xs"></i>
+                            Pay Now
+                        </button>
+                        <span *ngIf="pendingInstallment && !razorpayAvailable" class="text-xs text-amber-600">Payments temporarily unavailable</span>
+                        <span *ngIf="pendingInstallment && isPayingInstallment" class="text-xs text-gray-500">Opening payment…</span>
+                    </div>
+                </div>
+                <div class="p-5 flex flex-col gap-4">
+                    <!-- Progress Bar -->
+                    <div class="w-full bg-gray-100 rounded-full h-2">
+                        <div class="bg-blue-600 h-2 rounded-full transition-all duration-500"
+                            [style.width.%]="progressPercent"></div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div class="stat-cell">
+                            <span class="stat-label">EMI Amount</span>
+                            <span class="stat-value">{{ loan.installmentAmount }}</span>
+                        </div>
+                        <div class="stat-cell">
+                            <span class="stat-label">Next Installment</span>
+                            <span class="stat-value"
+                                [class.text-red-600]="loan.nextInstallmentDate === 'Overdue'">
+                                {{ loan.nextInstallmentDate }}
+                            </span>
+                        </div>
+                        <div class="stat-cell">
+                            <span class="stat-label">Due Date</span>
+                            <span class="stat-value">{{ loan.dueDate }}</span>
+                        </div>
+                        <div class="stat-cell">
+                            <span class="stat-label">Final Installment</span>
+                            <span class="stat-value">{{ loan.lastInstallmentDate }}</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Past Installments -->
+            <div class="loan-card">
+                <div class="card-header">
+                    <span class="card-label">Installment History</span>
+                </div>
+                <div class="divide-y divide-gray-50">
+                    <div class="installment-row flex items-center justify-between px-5 py-3"
+                        *ngFor="let inst of loan.pastInstallments">
+                        <div class="flex items-center gap-3">
+                            <div class="inst-dot"
+                                [class.dot-paid]="inst.status === 'paid'"
+                                [class.dot-upcoming]="inst.status === 'upcoming'"
+                                [class.dot-overdue]="inst.status === 'overdue'">
+                            </div>
+                            <div class="flex flex-col">
+                                <span class="text-sm font-medium text-gray-800">Installment #{{ inst.number }}</span>
+                                <span class="text-xs text-gray-400">{{ inst.date }}</span>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-3">
+                            <span class="text-sm font-medium text-gray-700">{{ inst.amount }}</span>
+                            <span class="inst-badge"
+                                [class.badge-paid]="inst.status === 'paid'"
+                                [class.badge-upcoming]="inst.status === 'upcoming'"
+                                [class.badge-overdue]="inst.status === 'overdue'">
+                                {{ inst.status }}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- Right Column -->
+        <div class="flex flex-col gap-5 w-72 shrink-0">
+
+            <!-- Loan Summary -->
+            <div class="loan-card">
+                <div class="card-header">
+                    <span class="card-label">Loan Summary</span>
+                </div>
+                <div class="p-5 flex flex-col gap-3">
+                    <div class="summary-row">
+                        <span class="summary-label">Total Amount</span>
+                        <span class="summary-value">{{ loan.totalAmount }}</span>
+                    </div>
+                    <div class="summary-row">
+                        <span class="summary-label">Amount Paid</span>
+                        <span class="summary-value text-green-600">{{ loan.paidAmount }}</span>
+                    </div>
+                    <div class="divider"></div>
+                    <div class="summary-row">
+                        <span class="summary-label font-semibold text-gray-800">Remaining</span>
+                        <span class="summary-value font-semibold text-blue-600">{{ loan.remainingAmount }}</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Reminder Card -->
+            <div class="loan-card">
+                <div class="card-header">
+                    <span class="card-label">Reminders</span>
+                </div>
+                <div class="p-5 flex flex-col gap-4">
+                    <div class="stat-cell" *ngIf="recommendedTopupToken > 0">
+                        <span class="stat-label">Recommended Top-up</span>
+                        <span class="stat-value text-amber-600">{{ recommendedTopupToken }} {{ loan.collateralAsset }}</span>
+                    </div>
+                    <div class="stat-cell" *ngIf="safetyColor">
+                        <span class="stat-label">Safety Meter</span>
+                        <span class="stat-value" [class.text-green-600]="safetyColor.toLowerCase() === 'green'"
+                            [class.text-yellow-600]="safetyColor.toLowerCase() === 'yellow'"
+                            [class.text-red-600]="safetyColor.toLowerCase() === 'red'">
+                            {{ safetyColor }}
+                        </span>
+                    </div>
+                    <div class="stat-cell">
+                        <span class="stat-label">Next Reminder</span>
+                        <span class="stat-value">{{ loan.nextReminderDate }}</span>
+                    </div>
+                    <div class="flex flex-col gap-2" *ngIf="explainabilityReasons.length">
+                        <span class="stat-label">Risk Reasons</span>
+                        <span class="text-xs text-gray-600" *ngFor="let reason of explainabilityReasons">• {{ reason }}</span>
+                    </div>
+                    <!-- Notification Mode -->
+                    <div class="flex flex-col gap-2">
+                        <span class="stat-label">Notify Via</span>
+                        <div class="grid grid-cols-2 gap-2">
+                            <button class="mode-btn"
+                                [class.mode-active]="isNotificationActive('email')"
+                                (click)="toggleNotification('email')">
+                                <i class="fa-solid fa-envelope text-xs"></i> Email
+                            </button>
+                            <button class="mode-btn"
+                                [class.mode-active]="isNotificationActive('whatsapp')"
+                                (click)="toggleNotification('whatsapp')">
+                                <i class="fa-brands fa-whatsapp text-xs"></i> WhatsApp
+                            </button>
+                            <button class="mode-btn"
+                                [class.mode-active]="isNotificationActive('phone')"
+                                (click)="toggleNotification('phone')">
+                                <i class="fa-solid fa-phone text-xs"></i> Phone
+                            </button>
+                            <button class="mode-btn"
+                                [class.mode-active]="isNotificationActive('telegram')"
+                                (click)="toggleNotification('telegram')">
+                                <i class="fa-brands fa-telegram text-xs"></i> Telegram
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+    </main>
+
+    <!-- Razorpay overlay is handled by the native Razorpay checkout SDK -->
+
+</div>
+
+<ng-template #notFound>
+    <div class="h-screen w-screen flex flex-col items-center justify-center gap-4">
+        <span class="text-gray-400 text-lg">Loan not found</span>
+        <button class="text-blue-600 text-sm hover:underline" (click)="goBack()">← Back to Board</button>
+    </div>
+</ng-template>

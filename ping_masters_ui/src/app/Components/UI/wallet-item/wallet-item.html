@@ -1,0 +1,8 @@
+<div class="wallet-row flex items-center justify-between bg-white rounded-xl px-5 py-3 w-full">
+    <span class="text-sm text-gray-700 truncate max-w-[200px]">{{ address }}</span>
+    <button
+        class="copy-btn text-xs font-medium text-blue-600 hover:text-blue-800 transition-colors duration-150 px-2"
+        (click)="copy()">
+        {{ copied ? '&#10003; Copied' : 'Copy' }}
+    </button>
+</div>

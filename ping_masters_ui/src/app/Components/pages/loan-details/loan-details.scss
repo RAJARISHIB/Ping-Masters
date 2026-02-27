@@ -1,0 +1,219 @@
+@use "tailwindcss";
+
+:host {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    width: 100vw;
+    overflow: hidden;
+    font-family: 'Google Sans', Roboto, Arial, sans-serif;
+}
+
+.loan-page {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    width: 100%;
+    background-color: #f8f9fa;
+}
+
+.loan-header {
+    background: #ffffff;
+    border-bottom: 1px solid #e8eaed;
+    height: 64px;
+    flex-shrink: 0;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+.loan-main {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: #dadce0 transparent;
+}
+
+.back-btn, .edit-btn {
+    cursor: pointer;
+}
+
+.title-input {
+    min-width: 200px;
+}
+
+// Card
+.loan-card {
+    background: #ffffff;
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(60, 64, 67, 0.08), 0 1px 2px rgba(60, 64, 67, 0.06);
+}
+
+.card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid #f1f3f4;
+}
+
+.card-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: #80868b;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.asset-badge {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: #1a73e8;
+    background-color: #e8f0fe;
+    padding: 2px 10px;
+    border-radius: 999px;
+}
+
+// Stats
+.stat-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.stat-label {
+    font-size: 0.7rem;
+    color: #80868b;
+    font-weight: 500;
+}
+
+.stat-value {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #202124;
+}
+
+.price-delta {
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 999px;
+
+    &.delta-up {
+        color: #137333;
+        background-color: #e6f4ea;
+    }
+    &.delta-down {
+        color: #c5221f;
+        background-color: #fce8e6;
+    }
+}
+
+// Installment rows
+.installment-row {
+    transition: background-color 0.15s ease;
+
+    &:hover {
+        background-color: #f8f9fa;
+    }
+}
+
+.inst-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+
+    &.dot-paid     { background-color: #34a853; }
+    &.dot-upcoming { background-color: #fbbc04; }
+    &.dot-overdue  { background-color: #ea4335; }
+}
+
+.inst-badge {
+    font-size: 0.65rem;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 999px;
+    text-transform: capitalize;
+
+    &.badge-paid     { background-color: #e6f4ea; color: #137333; }
+    &.badge-upcoming { background-color: #fef7e0; color: #8a6d00; }
+    &.badge-overdue  { background-color: #fce8e6; color: #c5221f; }
+}
+
+// Summary
+.summary-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.summary-label {
+    font-size: 0.8rem;
+    color: #5f6368;
+}
+
+.summary-value {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #202124;
+}
+
+.divider {
+    height: 1px;
+    background-color: #f1f3f4;
+    margin: 2px 0;
+}
+
+// Notification mode buttons
+.mode-btn {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    font-size: 0.7rem;
+    font-weight: 500;
+    padding: 6px 4px;
+    border-radius: 8px;
+    border: 1px solid #e8eaed;
+    color: #5f6368;
+    background-color: #ffffff;
+    cursor: pointer;
+    transition: all 0.15s ease;
+
+    &:hover {
+        background-color: #f8f9fa;
+        border-color: #dadce0;
+    }
+
+    &.mode-active {
+        background-color: #e8f0fe;
+        border-color: #1a73e8;
+        color: #1a73e8;
+    }
+}
+
+/* ─── Pay Now button ──────────────────────────────────────── */
+.pay-now-btn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    height: 28px;
+    padding: 0 12px;
+    border-radius: 14px;
+    background: #1a73e8;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    border: none;
+    cursor: pointer;
+    transition: background 0.15s, transform 0.1s;
+
+    &:hover {
+        background: #1765cc;
+        transform: translateY(-1px);
+    }
+}

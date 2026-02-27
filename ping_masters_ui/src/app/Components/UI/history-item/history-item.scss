@@ -1,0 +1,32 @@
+@use "tailwindcss";
+
+.history-row {
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    transition: box-shadow 0.2s ease, transform 0.15s ease;
+
+    &:hover {
+        box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+        transform: translateY(-1px);
+    }
+
+    &:active {
+        transform: translateY(0);
+        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }
+}
+
+.badge-pending {
+    background-color: #fef3c7;
+    color: #92400e;
+}
+
+.badge-completed {
+    background-color: #d1fae5;
+    color: #065f46;
+}
+
+.badge-failed {
+    background-color: #fee2e2;
+    color: #991b1b;
+}

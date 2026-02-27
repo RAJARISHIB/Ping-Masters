@@ -1,10 +1,11 @@
 import { AsyncPipe } from '@angular/common';
-import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, inject, signal, OnInit } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { Router } from '@angular/router';
 import type { User } from 'firebase/auth';
 import { distinctUntilChanged, filter, map, switchMap } from 'rxjs/operators';
 import { AuthService } from '../auth/auth.service';
+import { EventBusService } from '../services/communication.service';
 
 @Component({
   selector: 'app-login',
@@ -16,12 +17,13 @@ import { AuthService } from '../auth/auth.service';
 export class LoginComponent {
   private readonly authService = inject(AuthService);
   private readonly router = inject(Router);
-
   readonly user$ = this.authService.user$;
   readonly working = signal(false);
   readonly error = signal<string | null>(null);
 
-  constructor() {
+  constructor(
+    private _eventbus: EventBusService
+  ) {
     this.user$
       .pipe(
         filter((user): user is User => user !== null),
@@ -34,6 +36,13 @@ export class LoginComponent {
       .subscribe(() => {
         this.router.navigateByUrl('/get-started');
       });
+  }
+
+  ngOnInit(): void {
+        this.user$.subscribe((user)=>{
+          console.log("User>>", user)
+        });
+        this._eventbus.emit({key: "board",data: {message: "Hello from LoginComponent"}});
   }
 
   async signInWithGoogle(): Promise<void> {

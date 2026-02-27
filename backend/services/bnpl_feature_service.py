@@ -1452,3 +1452,18 @@ class BnplFeatureService:
         except Exception:
             logger.exception("Failed fetching audit events.")
             raise
+
+    def get_loans_by_user(self, user_id: str, limit: int = 50) -> Dict[str, Any]:
+        """List loans for a user from Firestore (or in-memory when Firebase is disabled)."""
+        try:
+            safe_limit = max(1, min(200, int(limit)))
+            loan_payloads = self._query_documents(
+                "loans",
+                filters=[("user_id", "==", user_id), ("is_deleted", "==", False)],
+                order_by=None,
+                limit=safe_limit,
+            )
+            return {"user_id": user_id, "total": len(loan_payloads), "loans": loan_payloads}
+        except Exception:
+            logger.exception("Failed listing loans for user_id=%s", user_id)
+            raise

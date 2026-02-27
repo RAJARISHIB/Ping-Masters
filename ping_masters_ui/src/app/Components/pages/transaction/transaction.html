@@ -1,0 +1,418 @@
+<div class="tx-page">
+
+    <!-- Confirmation Dialog -->
+    <div class="conf-overlay" *ngIf="showConfirmDialog">
+        <div class="conf-modal">
+            <div class="conf-modal-header">
+                <div class="conf-icon">
+                    <i class="fa-solid fa-triangle-exclamation text-amber-500 text-xl"></i>
+                </div>
+                <span class="text-lg font-bold text-gray-800">Confirm Transaction</span>
+                <span class="text-xs text-gray-400 text-center">
+                    This action is <strong>irreversible</strong>. Your BNB will be locked as collateral and INR disbursed to your bank.
+                </span>
+            </div>
+
+            <!-- Summary -->
+            <div class="conf-summary" *ngIf="loan">
+                <div class="conf-row">
+                    <span class="conf-key">Loan</span>
+                    <span class="conf-val">{{ loan.loanName }}</span>
+                </div>
+                <div class="conf-row">
+                    <span class="conf-key">Amount</span>
+                    <span class="conf-val text-blue-600 font-bold">₹{{ loan.amount | number }}</span>
+                </div>
+                <div class="conf-row">
+                    <span class="conf-key">BNB Collateral</span>
+                    <span class="conf-val font-bold">{{ loan.collateralRequired }} BNB</span>
+                </div>
+                <div class="conf-row" *ngIf="selectedBank">
+                    <span class="conf-key">Deposit to</span>
+                    <span class="conf-val">{{ selectedBank.bank }} {{ selectedBank.displayNumber }}</span>
+                </div>
+                <div class="conf-row" *ngIf="selectedWallet">
+                    <span class="conf-key">Debit from</span>
+                    <span class="conf-val font-mono text-sm">{{ formatAddress(selectedWallet.address) }}</span>
+                </div>
+            </div>
+
+            <div class="conf-actions">
+                <button class="conf-cancel" (click)="cancelConfirm()">Cancel</button>
+                <button class="conf-execute" (click)="executeTransaction()">
+                    <i class="fa-solid fa-lock mr-2"></i> Yes, Confirm
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toaster stack -->
+    <div class="toast-stack">
+        <div *ngFor="let t of toasters"
+            class="toast"
+            [class.toast-info]="t.type === 'info'"
+            [class.toast-success]="t.type === 'success'"
+            [class.toast-warning]="t.type === 'warning'"
+            [class.toast-error]="t.type === 'error'"
+            [class.toast-hidden]="!t.visible">
+            <div class="toast-icon">
+                <i class="fa-solid"
+                    [class.fa-circle-info]="t.type === 'info'"
+                    [class.fa-circle-check]="t.type === 'success'"
+                    [class.fa-triangle-exclamation]="t.type === 'warning'"
+                    [class.fa-circle-xmark]="t.type === 'error'"></i>
+            </div>
+            <div class="toast-body">
+                <span class="toast-title">{{ t.title }}</span>
+                <span class="toast-msg">{{ t.message }}</span>
+            </div>
+            <button class="toast-close" (click)="dismissToast(t.id)">
+                <i class="fa-solid fa-xmark text-xs"></i>
+            </button>
+        </div>
+    </div>
+
+    <!-- Header -->
+    <header class="tx-header flex items-center justify-between px-8 py-3">
+        <div class="flex items-center gap-4">
+            <button class="w-9 h-9 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors"
+                (click)="goBack()" [disabled]="txStatus === 'processing'">
+                <i class="fa-solid fa-arrow-left text-gray-600 text-sm"></i>
+            </button>
+            <div class="flex flex-col">
+                <span class="text-xl font-semibold text-gray-800">Confirm Transaction</span>
+                <span *ngIf="loan" class="text-xs text-gray-400">{{ loan.loanName }}</span>
+            </div>
+        </div>
+        <app-navbar></app-navbar>
+    </header>
+
+    <!-- Main -->
+    <main class="tx-main px-8 py-6 flex gap-6">
+
+        <!-- Left column — Selection -->
+        <div class="flex flex-col gap-5 flex-1 min-w-0">
+
+            <!-- Loan Summary -->
+            <div class="tx-card p-5 flex flex-col gap-4" *ngIf="loan">
+                <span class="section-label">Loan Summary</span>
+                <div class="grid grid-cols-3 gap-3">
+                    <div class="summary-cell">
+                        <span class="summary-key">Amount</span>
+                        <span class="summary-val text-blue-600">₹{{ loan.amount | number }}</span>
+                    </div>
+                    <div class="summary-cell">
+                        <span class="summary-key">EMI / month</span>
+                        <span class="summary-val">₹{{ loan.emiAmount | number }}</span>
+                    </div>
+                    <div class="summary-cell">
+                        <span class="summary-key">Installments</span>
+                        <span class="summary-val">{{ loan.installments }} months</span>
+                    </div>
+                    <div class="summary-cell">
+                        <span class="summary-key">BNB Collateral</span>
+                        <span class="summary-val font-bold">{{ loan.collateralRequired }} BNB</span>
+                    </div>
+                    <div class="summary-cell">
+                        <span class="summary-key">Liquidation at</span>
+                        <span class="summary-val text-red-500">${{ loan.liquidationPrice }}</span>
+                    </div>
+                    <div class="summary-cell">
+                        <span class="summary-key">Repay By</span>
+                        <span class="summary-val">{{ loan.repaymentDate }}</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Wallet Selection -->
+            <div class="tx-card p-5 flex flex-col gap-3">
+                <span class="section-label">Debit Wallet (Collateral)</span>
+                <p class="text-xs text-gray-400 -mt-1">
+                    BNB collateral will be locked from this wallet.
+                    <span *ngIf="loan"> Required: <strong>{{ loan.collateralRequired }} BNB</strong></span>
+                </p>
+                <div class="flex flex-col gap-2">
+                    <div *ngIf="walletsLoading" class="text-xs text-gray-400 px-1 py-2">Loading wallets from backend...</div>
+                    <label *ngFor="let w of wallets"
+                        class="wallet-row"
+                        [class.wallet-selected]="selectedWalletAddress === w.address"
+                        [class.wallet-insufficient]="loan && w.bnbBalance < loan.collateralRequired"
+                        (click)="txStatus === 'idle' && (selectedWalletAddress = w.address)">
+                        <div class="w-5 h-5 flex items-center justify-center">
+                            <div class="radio-outer"
+                                [class.radio-outer-active]="selectedWalletAddress === w.address">
+                                <div class="radio-inner"
+                                    [class.radio-inner-visible]="selectedWalletAddress === w.address"></div>
+                            </div>
+                        </div>
+                        <div class="wallet-icon">
+                            <i class="fa-brands fa-ethereum text-sm text-blue-500"></i>
+                        </div>
+                        <div class="flex flex-col flex-1 min-w-0">
+                            <span class="text-sm font-semibold text-gray-800">{{ w.label }}</span>
+                            <span class="text-xs text-gray-400 font-mono truncate">{{ formatAddress(w.address) }}</span>
+                        </div>
+                        <div class="flex flex-col items-end">
+                            <span class="text-sm font-bold"
+                                [class.text-green-600]="!loan || w.bnbBalance >= loan.collateralRequired"
+                                [class.text-red-500]="loan && w.bnbBalance < loan.collateralRequired">
+                                {{ w.bnbBalance }} BNB
+                            </span>
+                            <span *ngIf="loan && w.bnbBalance < loan.collateralRequired"
+                                class="text-xs text-red-400">Insufficient</span>
+                        </div>
+                    </label>
+                </div>
+                <div *ngIf="!walletsLoading && wallets.length === 0" class="text-xs text-red-500">No wallet available from API.</div>
+                <div *ngIf="!walletHasSufficientBnb" class="flex items-center gap-2 mt-1 text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                    <i class="fa-solid fa-triangle-exclamation"></i>
+                    Selected wallet has insufficient BNB for the required collateral.
+                </div>
+            </div>
+
+            <!-- Bank Account -->
+            <div class="tx-card p-5 flex flex-col gap-3">
+                <div class="flex items-center justify-between">
+                    <span class="section-label">Credit Bank Account</span>
+                    <button *ngIf="hasBankAccounts && !showAddBankForm"
+                        class="text-xs text-blue-600 hover:underline font-medium"
+                        (click)="showAddBankForm = true">
+                        + Add new account
+                    </button>
+                    <button *ngIf="showAddBankForm && hasBankAccounts"
+                        class="text-xs text-gray-500 hover:underline font-medium"
+                        (click)="showAddBankForm = false">
+                        Cancel
+                    </button>
+                </div>
+                <p class="text-xs text-gray-400 -mt-1">INR will be deposited into this account.</p>
+
+                <!-- Existing accounts -->
+                <div *ngIf="hasBankAccounts && !showAddBankForm" class="flex flex-col gap-2">
+                    <label *ngFor="let b of bankAccounts"
+                        class="bank-row"
+                        [class.bank-selected]="selectedBankId === b.id"
+                        (click)="txStatus === 'idle' && (selectedBankId = b.id)">
+                        <div class="w-5 h-5 flex items-center justify-center">
+                            <div class="radio-outer"
+                                [class.radio-outer-active]="selectedBankId === b.id">
+                                <div class="radio-inner"
+                                    [class.radio-inner-visible]="selectedBankId === b.id"></div>
+                            </div>
+                        </div>
+                        <div class="bank-icon">
+                            <i class="fa-solid fa-building-columns text-sm text-indigo-500"></i>
+                        </div>
+                        <div class="flex flex-col flex-1 min-w-0">
+                            <span class="text-sm font-semibold text-gray-800">{{ b.bank }}</span>
+                            <span class="text-xs text-gray-400">{{ b.name }} · {{ b.displayNumber }} · {{ b.ifsc }}</span>
+                        </div>
+                    </label>
+                </div>
+
+                <!-- Add bank form -->
+                <div *ngIf="showAddBankForm" class="flex flex-col gap-3 pt-1">
+                    <div class="flex gap-3">
+                        <div class="flex flex-col gap-1 flex-1">
+                            <span class="field-label-sm">Account Holder Name</span>
+                            <input class="field-input" type="text" placeholder="Full name on account"
+                                [(ngModel)]="newBank.accountHolder" />
+                        </div>
+                        <div class="flex flex-col gap-1 flex-1">
+                            <span class="field-label-sm">Bank Name</span>
+                            <input class="field-input" type="text" placeholder="e.g. HDFC Bank"
+                                [(ngModel)]="newBank.bankName" />
+                        </div>
+                    </div>
+                    <div class="flex gap-3">
+                        <div class="flex flex-col gap-1 flex-1">
+                            <span class="field-label-sm">Account Number</span>
+                            <input class="field-input" type="text" placeholder="Enter account number"
+                                [(ngModel)]="newBank.accountNumber" />
+                        </div>
+                        <div class="flex flex-col gap-1 flex-1">
+                            <span class="field-label-sm">Confirm Account Number</span>
+                            <input class="field-input" type="text" placeholder="Re-enter account number"
+                                [(ngModel)]="newBank.confirmAccountNumber" />
+                        </div>
+                    </div>
+                    <div class="flex gap-3 items-end">
+                        <div class="flex flex-col gap-1 flex-1 max-w-xs">
+                            <span class="field-label-sm">IFSC Code</span>
+                            <input class="field-input uppercase" type="text" placeholder="e.g. SBIN0001234"
+                                maxlength="11"
+                                [(ngModel)]="newBank.ifsc" />
+                        </div>
+                        <button class="save-bank-btn"
+                            [class.save-bank-disabled]="!newBankValid"
+                            [disabled]="!newBankValid"
+                            (click)="saveNewBank()">
+                            Save Account
+                        </button>
+                    </div>
+                    <div *ngIf="newBank.accountNumber && newBank.confirmAccountNumber && newBank.accountNumber !== newBank.confirmAccountNumber"
+                        class="text-xs text-red-500">Account numbers do not match.</div>
+                </div>
+
+                <!-- No accounts and form not shown -->
+                <div *ngIf="!hasBankAccounts && !showAddBankForm"
+                    class="flex flex-col items-center gap-3 py-6 text-center">
+                    <div class="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center">
+                        <i class="fa-solid fa-building-columns text-gray-400"></i>
+                    </div>
+                    <span class="text-sm text-gray-500">No bank account linked.</span>
+                    <button class="text-sm font-semibold text-blue-600 hover:underline"
+                        (click)="showAddBankForm = true">+ Add Bank Account</button>
+                </div>
+            </div>
+
+            <!-- spacer -->
+            <div class="h-20"></div>
+        </div>
+
+        <!-- Right column — Transaction Progress -->
+        <div class="flex flex-col gap-5 w-80 shrink-0">
+
+            <!-- Steps panel -->
+            <div class="tx-card p-5 flex flex-col gap-4">
+                <span class="section-label">Transaction Progress</span>
+
+                <!-- Idle state -->
+                <div *ngIf="txStatus === 'idle'" class="flex flex-col gap-3">
+                    <div *ngFor="let s of steps; let i = index" class="step-row step-idle">
+                        <div class="step-circle step-circle-idle">{{ i + 1 }}</div>
+                        <div class="flex flex-col">
+                            <span class="text-sm text-gray-400">{{ s.label }}</span>
+                            <span class="text-xs text-gray-300">{{ s.sublabel }}</span>
+                        </div>
+                    </div>
+                    <p class="text-xs text-gray-400 pt-1 border-t border-gray-100 mt-1">
+                        Click "Confirm Transaction" to begin. This action is irreversible.
+                    </p>
+                </div>
+
+                <!-- Processing state -->
+                <div *ngIf="txStatus === 'processing'" class="flex flex-col gap-3">
+                    <div *ngFor="let s of steps; let i = index" class="step-row"
+                        [class.step-done]="s.done"
+                        [class.step-active]="s.active"
+                        [class.step-idle]="!s.done && !s.active">
+                        <div class="step-circle"
+                            [class.step-circle-done]="s.done"
+                            [class.step-circle-active]="s.active"
+                            [class.step-circle-idle]="!s.done && !s.active">
+                            <i *ngIf="s.done" class="fa-solid fa-check text-xs"></i>
+                            <span *ngIf="!s.done && s.active" class="step-spinner"></span>
+                            <span *ngIf="!s.done && !s.active" class="text-xs">{{ i + 1 }}</span>
+                        </div>
+                        <div class="flex flex-col">
+                            <span class="text-sm font-medium"
+                                [class.text-gray-800]="s.active || s.done"
+                                [class.text-gray-400]="!s.active && !s.done">{{ s.label }}</span>
+                            <span class="text-xs"
+                                [class.text-blue-500]="s.active"
+                                [class.text-green-500]="s.done"
+                                [class.text-gray-300]="!s.active && !s.done">{{ s.sublabel }}</span>
+                        </div>
+                    </div>
+                    <div class="processing-bar mt-2">
+                        <div class="processing-fill"></div>
+                    </div>
+                </div>
+
+                <!-- Success state -->
+                <div *ngIf="txStatus === 'success'" class="flex flex-col items-center gap-3 py-4">
+                    <div class="w-14 h-14 rounded-full bg-green-100 flex items-center justify-center">
+                        <i class="fa-solid fa-check text-green-600 text-xl"></i>
+                    </div>
+                    <span class="text-base font-bold text-gray-800">Transaction Approved!</span>
+                    <span class="text-xs text-gray-400 text-center">
+                        Funds have been disbursed to your bank account.<br>
+                        Redirecting to dashboard…
+                    </span>
+                    <div *ngIf="loan && selectedBank" class="w-full rounded-xl bg-green-50 border border-green-200 px-4 py-3 flex flex-col gap-1 mt-1">
+                        <div class="flex justify-between text-xs">
+                            <span class="text-gray-500">Amount</span>
+                            <span class="font-bold text-green-700">₹{{ loan.amount | number }}</span>
+                        </div>
+                        <div class="flex justify-between text-xs">
+                            <span class="text-gray-500">Bank</span>
+                            <span class="text-gray-700">{{ selectedBank.bank }}</span>
+                        </div>
+                        <div class="flex justify-between text-xs">
+                            <span class="text-gray-500">Account</span>
+                            <span class="text-gray-700">{{ selectedBank.displayNumber }}</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Failed state -->
+                <div *ngIf="txStatus === 'failed'" class="flex flex-col items-center gap-3 py-4">
+                    <div class="w-14 h-14 rounded-full bg-red-100 flex items-center justify-center">
+                        <i class="fa-solid fa-xmark text-red-600 text-xl"></i>
+                    </div>
+                    <span class="text-base font-bold text-gray-800">Transaction Failed</span>
+                    <span class="text-xs text-gray-400 text-center">
+                        Please check backend/API availability and retry.
+                    </span>
+                </div>
+            </div>
+
+            <!-- Info card -->
+            <div class="tx-card p-5 flex flex-col gap-2"
+                *ngIf="txStatus === 'idle' && loan">
+                <span class="section-label">Rate & Fees</span>
+                <div class="flex justify-between text-xs py-1 border-b border-gray-50">
+                    <span class="text-gray-500">Interest Rate</span>
+                    <span class="text-gray-700 font-semibold">12% p.a.</span>
+                </div>
+                <div class="flex justify-between text-xs py-1 border-b border-gray-50">
+                    <span class="text-gray-500">Processing Fee</span>
+                    <span class="text-gray-700 font-semibold">₹{{ (loan.amount * 0.005) | number:'1.0-0' }}</span>
+                </div>
+                <div class="flex justify-between text-xs py-1 border-b border-gray-50">
+                    <span class="text-gray-500">Gas Fee (est.)</span>
+                    <span class="text-gray-700 font-semibold">~0.002 BNB</span>
+                </div>
+                <div class="flex justify-between text-xs py-2">
+                    <span class="text-gray-800 font-semibold">You receive</span>
+                    <span class="text-blue-600 font-bold text-sm">₹{{ (loan.amount - (loan.amount * 0.005)) | number:'1.0-0' }}</span>
+                </div>
+            </div>
+
+        </div>
+
+    </main>
+
+    <!-- Fixed bottom-right Confirm button -->
+    <div class="confirm-fab">
+        <span *ngIf="txStatus === 'idle' && !canConfirm" class="confirm-hint">
+            <i class="fa-solid fa-circle-info mr-1"></i>
+            {{ !walletHasSufficientBnb ? 'Insufficient BNB in selected wallet' : 'Select wallet & bank account' }}
+        </span>
+        <button *ngIf="txStatus === 'idle'"
+            class="confirm-btn"
+            [class.confirm-disabled]="!canConfirm"
+            [disabled]="!canConfirm"
+            (click)="confirmTransaction()">
+            <i class="fa-solid fa-lock mr-2 text-sm"></i>
+            Confirm Transaction
+        </button>
+        <div *ngIf="txStatus === 'processing'" class="confirm-btn confirm-processing">
+            <span class="step-spinner mr-2"></span>
+            Processing…
+        </div>
+        <button *ngIf="txStatus === 'success'"
+            class="confirm-btn confirm-success"
+            (click)="goBack()">
+            <i class="fa-solid fa-house mr-2 text-sm"></i>
+            Go to Dashboard
+        </button>
+        <button *ngIf="txStatus === 'failed'"
+            class="confirm-btn"
+            (click)="txStatus = 'idle'">
+            Retry
+        </button>
+    </div>
+
+</div>

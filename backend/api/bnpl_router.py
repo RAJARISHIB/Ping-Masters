@@ -255,9 +255,18 @@ def build_bnpl_router(service: BnplFeatureService) -> APIRouter:
             logger.exception("Razorpay status endpoint failed.")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
 
+    @router.get("/loans", summary="List loans for a user (from Firestore when Firebase enabled)")
+    def list_loans(user_id: str = Query(..., min_length=3), limit: int = Query(default=50, ge=1, le=200)) -> Dict[str, Any]:
+        """Return loans for the given user_id. Data is read from Firestore (bnpl_loans) when Firebase is enabled."""
+        try:
+            return service.get_loans_by_user(user_id=user_id, limit=limit)
+        except Exception as exc:
+            logger.exception("List loans endpoint failed user_id=%s", user_id)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
     @router.post("/plans", summary="Create BNPL plan + schedule")
     def create_plan(payload: BnplCreatePlanRequest) -> Dict[str, Any]:
-        """Create plan and schedule rows."""
+        """Create plan and schedule rows (stored in Firestore bnpl_loans when Firebase enabled)."""
         try:
             return service.create_bnpl_plan(**payload.dict())
         except ValueError as exc:

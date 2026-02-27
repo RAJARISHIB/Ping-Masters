@@ -471,7 +471,7 @@ def build_router(settings: AppSettings) -> APIRouter:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
     @router.get("/market/resolve", summary="Resolve symbol to provider coin id")
-    def market_resolve(symbol: str) -> dict:
+    def market_resolve(symbol: str = Query(..., min_length=1)) -> dict:
         """Resolve user-provided symbol/id into normalized provider id."""
         try:
             coin_id = market_service.resolve_coin_id(symbol_or_id=symbol)
@@ -487,7 +487,11 @@ def build_router(settings: AppSettings) -> APIRouter:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
     @router.get("/currency/convert", summary="Convert amount to target currency")
-    def currency_convert(amount: float, from_currency: str, to_currency: str) -> dict:
+    def currency_convert(
+        amount: float = Query(..., ge=0),
+        from_currency: str = Query(..., min_length=3, max_length=3),
+        to_currency: str = Query(..., min_length=3, max_length=3),
+    ) -> dict:
         """Convert amount using configured public currency API."""
         try:
             return convert_currency_amount(
@@ -511,8 +515,9 @@ def build_router(settings: AppSettings) -> APIRouter:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
 
     @router.get("/settings", summary="Settings snapshot")
-    def get_settings_snapshot() -> dict[str, Union[str, bool, int]]:
-        """Expose non-sensitive settings useful for local verification."""
+    def get_settings_snapshot() -> dict:
+        """Expose non-sensitive settings and API capabilities for UI gating."""
+        razorpay_configured = bool(razorpay_service and razorpay_service.is_configured)
         return {
             "app_name": settings.app_name,
             "debug": settings.debug,
@@ -524,7 +529,18 @@ def build_router(settings: AppSettings) -> APIRouter:
             "emi_plans_path": settings.emi_plans_path,
             "emi_default_plan_id": settings.emi_default_plan_id,
             "razorpay_enabled": settings.razorpay_enabled,
-            "razorpay_configured": bool(razorpay_service and razorpay_service.is_configured),
+            "razorpay_configured": razorpay_configured,
+            "api_capabilities": {
+                "market": True,
+                "risk": True,
+                "ml": settings.ml_enabled,
+                "bnpl": True,
+                "protocol": True,
+                "web3": settings.web3_enabled,
+                "users": settings.firebase_enabled,
+                "razorpay": razorpay_configured,
+                "oracle": True,
+            },
         }
 
     @router.get("/ml/health", summary="ML model health")
@@ -905,12 +921,12 @@ def build_router(settings: AppSettings) -> APIRouter:
 
     @router.post(
         "/users/from-firebase",
-        summary="Create user from firebase profile by user_id",
+        summary="Create or update user from Firebase profile (upsert); stores user details and wallets in Firestore.",
         response_model=UserModel,
         status_code=status.HTTP_201_CREATED,
     )
     def create_user_from_firebase(payload: UserFromFirebaseCreateRequest) -> UserModel:
-        """Fetch profile fields from Firebase and persist mapped user record."""
+        """Upsert user in Firestore: fetch profile from Firebase profile collection, persist/update user and wallets."""
         try:
             if firebase_manager is None:
                 raise HTTPException(
@@ -918,6 +934,7 @@ def build_router(settings: AppSettings) -> APIRouter:
                     detail="Firebase client is not configured or unavailable.",
                 )
 
+            repo = _require_user_repository(user_repository)
             profile_doc = firebase_manager.get_document(
                 collection_name=settings.firebase_profile_collection,
                 document_id=payload.user_id,
@@ -936,7 +953,36 @@ def build_router(settings: AppSettings) -> APIRouter:
                 autopay_enabled=payload.autopay_enabled,
                 kyc_level=payload.kyc_level,
             )
-            return _require_user_repository(user_repository).create(user)
+            try:
+                existing = repo.get_by_id(payload.user_id)
+                merged = UserModel(
+                    user_id=existing.user_id,
+                    email=email or existing.email,
+                    phone=phone or existing.phone,
+                    full_name=full_name or existing.full_name,
+                    currency_code=payload.currency_code or existing.currency_code,
+                    currency_symbol=payload.currency_symbol or existing.currency_symbol,
+                    wallet_address=payload.wallet_address if (payload.wallet_address and len(payload.wallet_address) > 0) else existing.wallet_address,
+                    notification_channels=payload.notification_channels if (payload.notification_channels and len(payload.notification_channels) > 0) else existing.notification_channels,
+                    autopay_enabled=payload.autopay_enabled,
+                    kyc_level=payload.kyc_level if payload.kyc_level is not None else existing.kyc_level,
+                    status=existing.status,
+                    version=existing.version,
+                    created_at=existing.created_at,
+                    on_time_payment_count=existing.on_time_payment_count,
+                    late_payment_count=existing.late_payment_count,
+                    top_up_count=existing.top_up_count,
+                    loan_currency=existing.loan_currency,
+                    total_borrowed_fiat=existing.total_borrowed_fiat,
+                    total_repaid_fiat=existing.total_repaid_fiat,
+                    outstanding_debt_fiat=existing.outstanding_debt_fiat,
+                    last_loan_action=existing.last_loan_action,
+                    last_loan_action_at=existing.last_loan_action_at,
+                )
+                merged.version += 1
+                return repo.update(merged)
+            except ModelNotFoundError:
+                return repo.create(user)
         except HTTPException:
             raise
         except ValueError as exc:
@@ -1039,21 +1085,36 @@ def build_web3_router(web3_manager: Optional[Web3ClientManager], read_function: 
     @router.get("/get-data", summary="Get contract values from BSC and opBNB")
     def get_data() -> dict:
         """Read configured smart contract value from both chains."""
+        if web3_manager is None:
+            return {
+                "available": False,
+                "bsc_testnet_value": None,
+                "opbnb_testnet_value": None,
+                "function_name": read_function,
+                "message": "Web3 is not configured or unavailable.",
+            }
         try:
-            return _require_web3_manager(web3_manager).read_contract_values(read_function)
-        except HTTPException:
-            raise
+            out = web3_manager.read_contract_values(read_function)
+            out["available"] = True
+            return out
         except Exception as exc:
             logger.exception("Web3 get-data endpoint failed.")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
 
     @router.get("/web3/health", summary="Web3 provider health")
-    def web3_health() -> dict[str, bool]:
+    def web3_health() -> dict:
         """Check chain provider connectivity."""
+        if web3_manager is None:
+            return {
+                "bsc_connected": False,
+                "opbnb_connected": False,
+                "available": False,
+                "message": "Web3 is not configured or unavailable.",
+            }
         try:
-            return _require_web3_manager(web3_manager).health()
-        except HTTPException:
-            raise
+            out = web3_manager.health()
+            out["available"] = True
+            return out
         except Exception as exc:
             logger.exception("Web3 health endpoint failed.")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
@@ -1061,10 +1122,18 @@ def build_web3_router(web3_manager: Optional[Web3ClientManager], read_function: 
     @router.get("/web3/get-data", summary="Get contract values (namespaced)")
     def web3_get_data() -> dict:
         """Namespaced alias for contract read endpoint."""
+        if web3_manager is None:
+            return {
+                "available": False,
+                "bsc_testnet_value": None,
+                "opbnb_testnet_value": None,
+                "function_name": read_function,
+                "message": "Web3 is not configured or unavailable.",
+            }
         try:
-            return _require_web3_manager(web3_manager).read_contract_values(read_function)
-        except HTTPException:
-            raise
+            out = web3_manager.read_contract_values(read_function)
+            out["available"] = True
+            return out
         except Exception as exc:
             logger.exception("Web3 namespaced get-data endpoint failed.")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
@@ -1072,6 +1141,17 @@ def build_web3_router(web3_manager: Optional[Web3ClientManager], read_function: 
     @router.get("/web3/account/{wallet}", summary="Get on-chain wallet account snapshot")
     def web3_account(wallet: str, chain: str = Query(default="bsc")) -> dict:
         """Fetch native balance + contract state + remaining debt for a wallet."""
+        if web3_manager is None:
+            return {
+                "available": False,
+                "wallet": wallet.strip(),
+                "chain": chain.lower(),
+                "contract_address": None,
+                "native_balance_wei": "0",
+                "native_balance_bnb": "0",
+                "account_state": None,
+                "warnings": ["Web3 is not configured or unavailable."],
+            }
         try:
             return _require_web3_manager(web3_manager).get_wallet_protocol_summary(wallet=wallet, chain=chain)
         except HTTPException:
@@ -1091,6 +1171,19 @@ def build_web3_router(web3_manager: Optional[Web3ClientManager], read_function: 
         limit: int = Query(default=200, ge=1, le=1000),
     ) -> dict:
         """Fetch wallet event history from contract logs with tx hashes."""
+        if web3_manager is None:
+            return {
+                "available": False,
+                "wallet": wallet.strip(),
+                "chain": chain.lower(),
+                "contract_address": None,
+                "from_block": from_block,
+                "to_block": to_block,
+                "total_records": 0,
+                "returned_records": 0,
+                "records": [],
+                "warnings": ["Web3 is not configured or unavailable."],
+            }
         try:
             return _require_web3_manager(web3_manager).get_wallet_transaction_history(
                 wallet=wallet,

@@ -1,5 +1,6 @@
 import { Injectable, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
+import { environment } from '../../environments/environment';
 
 export type FromFirebaseUserPayload = {
   user_id: string;
@@ -10,6 +11,7 @@ export type FromFirebaseUserPayload = {
 @Injectable({ providedIn: 'root' })
 export class UsersApiService {
   private readonly http = inject(HttpClient);
+  private readonly baseUrl = environment.apiUrl;
 
   createFromFirebase(payload: FromFirebaseUserPayload) {
     const allowedChannels = new Set(['email', 'whatsapp']);
@@ -21,6 +23,6 @@ export class UsersApiService {
       )
     };
 
-    return this.http.post('http://127.0.0.1:8000/users/from-firebase', body);
+    return this.http.post(`${this.baseUrl}/users/from-firebase`, body);
   }
 }
