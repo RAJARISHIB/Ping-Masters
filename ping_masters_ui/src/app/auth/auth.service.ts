@@ -50,6 +50,7 @@ export class AuthService {
     uid: string,
     details: {
       wallet_address: Array<{ name: string; wallet_id: string }>;
+      currency: string;
       mobile_number: string | null;
       notification_channels: string[];
     }
@@ -60,6 +61,7 @@ export class AuthService {
       userRef,
       {
         wallet_address: details.wallet_address,
+        currency: details.currency,
         mobile_number: details.mobile_number,
         notification_channels: details.notification_channels
       },
