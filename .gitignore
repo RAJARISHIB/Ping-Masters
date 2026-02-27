@@ -5,3 +5,4 @@ __pycache__/
 .env
 # Ignore the .vscode directory that contains Visual Studio Code settings
 .vscode/
+firebase_private.json

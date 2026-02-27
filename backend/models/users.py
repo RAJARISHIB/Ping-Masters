@@ -3,13 +3,20 @@
 import logging
 from typing import List, Optional
 
-from pydantic import Field, validator
+from pydantic import BaseModel, Field, validator
 
 from .base import BaseDocumentModel
 from .enums import UserStatus
 
 
 logger = logging.getLogger(__name__)
+
+
+class WalletAddressModel(BaseModel):
+    """Wallet metadata entry for a user profile."""
+
+    name: str = Field(..., min_length=2)
+    wallet_id: str = Field(..., min_length=6)
 
 
 class UserModel(BaseDocumentModel):
@@ -23,7 +30,7 @@ class UserModel(BaseDocumentModel):
     notification_channels: List[str] = Field(default_factory=list)
     status: UserStatus = Field(default=UserStatus.ACTIVE)
     kyc_level: int = Field(default=0, ge=0, le=3)
-    wallet_address: Optional[str] = Field(default=None)
+    wallet_address: List[WalletAddressModel] = Field(default_factory=list)
     on_time_payment_count: int = Field(default=0, ge=0)
     late_payment_count: int = Field(default=0, ge=0)
     top_up_count: int = Field(default=0, ge=0)
@@ -36,4 +43,13 @@ class UserModel(BaseDocumentModel):
             return sorted(set(channels))
         except Exception:
             logger.exception("Failed to normalize notification channels.")
+            return []
+
+    @validator("wallet_address", pre=True, always=True)
+    def _normalize_wallet_address(cls, value: Optional[List[dict]]) -> List[dict]:
+        """Normalize missing wallet list to an empty array for stable storage."""
+        try:
+            return value or []
+        except Exception:
+            logger.exception("Failed to normalize wallet_address payload.")
             return []

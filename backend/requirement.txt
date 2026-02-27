@@ -4,3 +4,4 @@ uvicorn[standard]
 python-dotenv
 pydantic
 google-cloud-firestore
+web3
