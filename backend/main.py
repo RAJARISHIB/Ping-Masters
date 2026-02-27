@@ -1,10 +1,24 @@
 """Application entrypoint for the Ping Masters FastAPI backend."""
 
+import sys
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Ensure repo root and ml package are importable
+# ---------------------------------------------------------------------------
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_BACKEND_DIR = Path(__file__).resolve().parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from api.router import build_router
+from api.risk_routes import build_risk_router
 from core import get_logger, load_settings, setup_logging
 from services import LiquidationPoller
 
@@ -30,7 +44,9 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(build_router(settings))
+    app.include_router(build_risk_router())
 
+    # ── Background services ──────────────────────────────────────────────
     poller = LiquidationPoller(settings=settings)
     app.state.liquidation_poller = poller
 
