@@ -1,0 +1,825 @@
+{
+	"compiler": {
+		"version": "0.8.31+commit.fd3a2265"
+	},
+	"language": "Solidity",
+	"output": {
+		"abi": [
+			{
+				"inputs": [
+					{
+						"internalType": "address",
+						"name": "_debtTokenUSD",
+						"type": "address"
+					},
+					{
+						"internalType": "address",
+						"name": "_debtTokenINR",
+						"type": "address"
+					},
+					{
+						"internalType": "address",
+						"name": "_priceOracle",
+						"type": "address"
+					}
+				],
+				"stateMutability": "nonpayable",
+				"type": "constructor"
+			},
+			{
+				"inputs": [],
+				"name": "BorrowLimitExceeded",
+				"type": "error"
+			},
+			{
+				"inputs": [],
+				"name": "CollateralTransferFailed",
+				"type": "error"
+			},
+			{
+				"inputs": [],
+				"name": "ContractPaused",
+				"type": "error"
+			},
+			{
+				"inputs": [],
+				"name": "CurrencyLockedWhileInDebt",
+				"type": "error"
+			},
+			{
+				"inputs": [],
+				"name": "InsufficientCollateral",
+				"type": "error"
+			},
+			{
+				"inputs": [],
+				"name": "InsufficientDebtBalance",
+				"type": "error"
+			},
+			{
+				"inputs": [],
+				"name": "NoBorrowedDebt",
+				"type": "error"
+			},
+			{
+				"inputs": [],
+				"name": "NoCurrencySet",
+				"type": "error"
+			},
+			{
+				"inputs": [],
+				"name": "NotOwner",
+				"type": "error"
+			},
+			{
+				"inputs": [],
+				"name": "PositionHealthy",
+				"type": "error"
+			},
+			{
+				"inputs": [],
+				"name": "WithdrawWouldLiquidate",
+				"type": "error"
+			},
+			{
+				"inputs": [],
+				"name": "ZeroAmount",
+				"type": "error"
+			},
+			{
+				"anonymous": false,
+				"inputs": [
+					{
+						"indexed": true,
+						"internalType": "address",
+						"name": "user",
+						"type": "address"
+					},
+					{
+						"indexed": false,
+						"internalType": "uint256",
+						"name": "amount",
+						"type": "uint256"
+					},
+					{
+						"indexed": false,
+						"internalType": "enum PriceConsumer.Currency",
+						"name": "currency",
+						"type": "uint8"
+					}
+				],
+				"name": "Borrowed",
+				"type": "event"
+			},
+			{
+				"anonymous": false,
+				"inputs": [
+					{
+						"indexed": true,
+						"internalType": "address",
+						"name": "user",
+						"type": "address"
+					},
+					{
+						"indexed": false,
+						"internalType": "uint256",
+						"name": "amount",
+						"type": "uint256"
+					}
+				],
+				"name": "CollateralDeposited",
+				"type": "event"
+			},
+			{
+				"anonymous": false,
+				"inputs": [
+					{
+						"indexed": true,
+						"internalType": "address",
+						"name": "user",
+						"type": "address"
+					},
+					{
+						"indexed": false,
+						"internalType": "uint256",
+						"name": "amount",
+						"type": "uint256"
+					}
+				],
+				"name": "CollateralWithdrawn",
+				"type": "event"
+			},
+			{
+				"anonymous": false,
+				"inputs": [
+					{
+						"indexed": true,
+						"internalType": "address",
+						"name": "user",
+						"type": "address"
+					},
+					{
+						"indexed": false,
+						"internalType": "enum PriceConsumer.Currency",
+						"name": "currency",
+						"type": "uint8"
+					}
+				],
+				"name": "CurrencySet",
+				"type": "event"
+			},
+			{
+				"anonymous": false,
+				"inputs": [
+					{
+						"indexed": true,
+						"internalType": "address",
+						"name": "user",
+						"type": "address"
+					},
+					{
+						"indexed": true,
+						"internalType": "address",
+						"name": "liquidator",
+						"type": "address"
+					},
+					{
+						"indexed": false,
+						"internalType": "uint256",
+						"name": "debtRepaid",
+						"type": "uint256"
+					},
+					{
+						"indexed": false,
+						"internalType": "uint256",
+						"name": "collateralSeized",
+						"type": "uint256"
+					},
+					{
+						"indexed": false,
+						"internalType": "uint256",
+						"name": "bonus",
+						"type": "uint256"
+					},
+					{
+						"indexed": false,
+						"internalType": "enum PriceConsumer.Currency",
+						"name": "currency",
+						"type": "uint8"
+					}
+				],
+				"name": "Liquidated",
+				"type": "event"
+			},
+			{
+				"anonymous": false,
+				"inputs": [
+					{
+						"indexed": false,
+						"internalType": "bool",
+						"name": "state",
+						"type": "bool"
+					}
+				],
+				"name": "Paused",
+				"type": "event"
+			},
+			{
+				"anonymous": false,
+				"inputs": [
+					{
+						"indexed": true,
+						"internalType": "address",
+						"name": "user",
+						"type": "address"
+					},
+					{
+						"indexed": false,
+						"internalType": "uint256",
+						"name": "amount",
+						"type": "uint256"
+					}
+				],
+				"name": "Repaid",
+				"type": "event"
+			},
+			{
+				"inputs": [],
+				"name": "LIQUIDATION_BONUS",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "LIQUIDATION_THRESHOLD",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "MAX_LTV",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "PRECISION",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "PRICE_DECIMALS",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "uint256",
+						"name": "amount",
+						"type": "uint256"
+					},
+					{
+						"internalType": "enum PriceConsumer.Currency",
+						"name": "currency",
+						"type": "uint8"
+					}
+				],
+				"name": "borrow",
+				"outputs": [],
+				"stateMutability": "nonpayable",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "uint256",
+						"name": "amount",
+						"type": "uint256"
+					}
+				],
+				"name": "borrow",
+				"outputs": [],
+				"stateMutability": "nonpayable",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "address",
+						"name": "",
+						"type": "address"
+					}
+				],
+				"name": "borrowedAmount",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "uint256",
+						"name": "",
+						"type": "uint256"
+					}
+				],
+				"name": "borrowers",
+				"outputs": [
+					{
+						"internalType": "address",
+						"name": "",
+						"type": "address"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "address",
+						"name": "",
+						"type": "address"
+					}
+				],
+				"name": "collateralAmount",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "debtTokenINR",
+				"outputs": [
+					{
+						"internalType": "contract DebtToken",
+						"name": "",
+						"type": "address"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "debtTokenUSD",
+				"outputs": [
+					{
+						"internalType": "contract DebtToken",
+						"name": "",
+						"type": "address"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "depositCollateral",
+				"outputs": [],
+				"stateMutability": "payable",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "address",
+						"name": "user",
+						"type": "address"
+					}
+				],
+				"name": "getAccountStatus",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "collateralBNB",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "collateralFiat",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "debt",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "healthFactor",
+						"type": "uint256"
+					},
+					{
+						"internalType": "bool",
+						"name": "isLiquidatable",
+						"type": "bool"
+					},
+					{
+						"internalType": "enum PriceConsumer.Currency",
+						"name": "currency",
+						"type": "uint8"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "address",
+						"name": "user",
+						"type": "address"
+					}
+				],
+				"name": "getBorrowCapacity",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "getBorrowerCount",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "getBorrowers",
+				"outputs": [
+					{
+						"internalType": "address[]",
+						"name": "",
+						"type": "address[]"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "address",
+						"name": "",
+						"type": "address"
+					}
+				],
+				"name": "hasCurrency",
+				"outputs": [
+					{
+						"internalType": "bool",
+						"name": "",
+						"type": "bool"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "address",
+						"name": "user",
+						"type": "address"
+					}
+				],
+				"name": "liquidate",
+				"outputs": [],
+				"stateMutability": "nonpayable",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "owner",
+				"outputs": [
+					{
+						"internalType": "address",
+						"name": "",
+						"type": "address"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "paused",
+				"outputs": [
+					{
+						"internalType": "bool",
+						"name": "",
+						"type": "bool"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "priceOracle",
+				"outputs": [
+					{
+						"internalType": "contract PriceConsumer",
+						"name": "",
+						"type": "address"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "uint256",
+						"name": "amount",
+						"type": "uint256"
+					}
+				],
+				"name": "repay",
+				"outputs": [],
+				"stateMutability": "nonpayable",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "enum PriceConsumer.Currency",
+						"name": "currency",
+						"type": "uint8"
+					}
+				],
+				"name": "setCurrency",
+				"outputs": [],
+				"stateMutability": "nonpayable",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "bool",
+						"name": "_paused",
+						"type": "bool"
+					}
+				],
+				"name": "setPaused",
+				"outputs": [],
+				"stateMutability": "nonpayable",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "address",
+						"name": "newOwner",
+						"type": "address"
+					}
+				],
+				"name": "transferOwnership",
+				"outputs": [],
+				"stateMutability": "nonpayable",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "address",
+						"name": "",
+						"type": "address"
+					}
+				],
+				"name": "userCurrency",
+				"outputs": [
+					{
+						"internalType": "enum PriceConsumer.Currency",
+						"name": "",
+						"type": "uint8"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "uint256",
+						"name": "amount",
+						"type": "uint256"
+					}
+				],
+				"name": "withdrawCollateral",
+				"outputs": [],
+				"stateMutability": "nonpayable",
+				"type": "function"
+			},
+			{
+				"stateMutability": "payable",
+				"type": "receive"
+			}
+		],
+		"devdoc": {
+			"kind": "dev",
+			"methods": {
+				"borrow(uint256)": {
+					"params": {
+						"amount": "Debt to mint in the user's denomination (18-decimal)."
+					}
+				},
+				"borrow(uint256,uint8)": {
+					"params": {
+						"amount": "Debt amount (18-decimal).",
+						"currency": "PriceConsumer.Currency.USD (0)  or  .INR (1)"
+					}
+				},
+				"constructor": {
+					"params": {
+						"_debtTokenINR": "Address of the pmINR DebtToken.",
+						"_debtTokenUSD": "Address of the pmUSD DebtToken.",
+						"_priceOracle": "Address of the PriceConsumer."
+					}
+				},
+				"getAccountStatus(address)": {
+					"returns": {
+						"collateralBNB": "   BNB deposited (wei).",
+						"collateralFiat": "  Collateral value in user's currency (18-dec).",
+						"currency": "        PriceConsumer.Currency (0=USD, 1=INR).",
+						"debt": "            Outstanding debt (18-dec).",
+						"healthFactor": "    Scaled by 1e18. >= 1e18 = safe.",
+						"isLiquidatable": "  True when healthFactor < 1e18."
+					}
+				},
+				"liquidate(address)": {
+					"params": {
+						"user": "The under-collateralised borrower's address."
+					}
+				},
+				"repay(uint256)": {
+					"params": {
+						"amount": "Amount to repay (18-decimal)."
+					}
+				},
+				"setCurrency(uint8)": {
+					"params": {
+						"currency": "PriceConsumer.Currency.USD (0)  or  .INR (1)"
+					}
+				},
+				"withdrawCollateral(uint256)": {
+					"params": {
+						"amount": "Amount in wei."
+					}
+				}
+			},
+			"title": "LendingEngine",
+			"version": 1
+		},
+		"userdoc": {
+			"kind": "user",
+			"methods": {
+				"borrow(uint256)": {
+					"notice": "Borrow using the user's pre-set currency.         Call setCurrency() first, or use borrow(amount, currency)."
+				},
+				"borrow(uint256,uint8)": {
+					"notice": "Set currency AND borrow in one transaction.         Designed for first-time borrowers; the FastAPI API call passes         the user's chosen currency from the request body."
+				},
+				"borrowedAmount(address)": {
+					"notice": "Debt minted per user in their chosen currency (18-decimal)."
+				},
+				"collateralAmount(address)": {
+					"notice": "BNB deposited per user (wei)."
+				},
+				"depositCollateral()": {
+					"notice": "Deposit BNB as collateral."
+				},
+				"getAccountStatus(address)": {
+					"notice": "Full position snapshot — called by the FastAPI bot every ~3 s."
+				},
+				"getBorrowCapacity(address)": {
+					"notice": "Maximum additional debt the user can borrow right now."
+				},
+				"hasCurrency(address)": {
+					"notice": "True once the user has set a currency preference."
+				},
+				"liquidate(address)": {
+					"notice": "Liquidate an unhealthy position.  Flow:   1. Verify healthFactor < 1e18.   2. Burn the full outstanding pmUSD or pmINR from the liquidator.   3. Transfer (debtInBNB + 5% bonus) BNB to the liquidator.  The liquidator must hold sufficient pmUSD or pmINR before calling."
+				},
+				"repay(uint256)": {
+					"notice": "Repay outstanding debt (pmUSD or pmINR depending on user's currency)."
+				},
+				"setCurrency(uint8)": {
+					"notice": "Set or confirm the user's preferred debt currency.         Can only be changed when the user has zero outstanding debt.         The FastAPI backend calls this on user registration or after         the user fully repays and wants to switch currency."
+				},
+				"userCurrency(address)": {
+					"notice": "The currency (USD=0, INR=1) the user chose."
+				},
+				"withdrawCollateral(uint256)": {
+					"notice": "Withdraw BNB collateral.         Reverts if the withdrawal would make the position unhealthy."
+				}
+			},
+			"notice": "Core lending/borrowing/liquidation contract for Ping-Masters.         Deployed on BNB Smart Chain Testnet. ═══════════════════════════════════════════════════════════════════  DUAL CURRENCY SUPPORT ═══════════════════════════════════════════════════════════════════  Each user chooses USD or INR as their debt denomination.  The FastAPI API passes the preference as:    currency = 0  ->  USD  (mints pmUSD, uses BNB/USD price feed)    currency = 1  ->  INR  (mints pmINR, uses BNB/INR price feed)  Currency can only be changed when the user has ZERO active debt. ═══════════════════════════════════════════════════════════════════  MATH (no floating point) ═══════════════════════════════════════════════════════════════════  BNB collateral  ->  wei           (1 BNB  = 1e18)  pmUSD / pmINR   ->  18 decimals   ($1=1e18  /  Rs1=1e18)  Oracle price    ->  8 decimals    (Chainlink convention)  collateralValue = collateralWei * price / 1e8  healthFactor    = (collateralValue * LIQUIDATION_THRESHOLD * 1e18)                    ──────────────────────────────────────────────                              (borrowedAmount * 100)  HF >= 1e18  ->  SAFE          HF < 1e18  ->  LIQUIDATABLE",
+			"version": 1
+		}
+	},
+	"settings": {
+		"compilationTarget": {
+			"contracts/src/LendingEngine.sol": "LendingEngine"
+		},
+		"evmVersion": "osaka",
+		"libraries": {},
+		"metadata": {
+			"bytecodeHash": "ipfs"
+		},
+		"optimizer": {
+			"enabled": false,
+			"runs": 200
+		},
+		"remappings": []
+	},
+	"sources": {
+		"contracts/src/DebtToken.sol": {
+			"keccak256": "0x17aad8fbfb34fcd6789365f83edb196c0c0a846f5ba38f717fec8656dbea9357",
+			"license": "MIT",
+			"urls": [
+				"bzz-raw://425557d020177f947ffc97f8e27739f36e5a3c27b5d0d118c14590048a1ace07",
+				"dweb:/ipfs/QmcQDhKyN5Z8ZdeSwdzzSa4dUw9RQVy1zysiKR4omQV4CK"
+			]
+		},
+		"contracts/src/LendingEngine.sol": {
+			"keccak256": "0xbea8d60262f6bef22fd07c72c8839864d67a95cc1eb94dec899b9975f7019968",
+			"license": "MIT",
+			"urls": [
+				"bzz-raw://3ff616850dfae988c153d91db4b7c281934a743006663f66f66617d1dbc0df4b",
+				"dweb:/ipfs/QmTwDwPsizQibCrWvAZqgAWRfV6YdCbE1cmn5vvYaN4EU2"
+			]
+		},
+		"contracts/src/PriceConsumer.sol": {
+			"keccak256": "0xd7c444ea52d6f48bf3f0fb34bc7b163aa0aaef4c13bd3181100cb7b8eb164623",
+			"license": "MIT",
+			"urls": [
+				"bzz-raw://d49dab48d712592731bd80b93c410fddeb324c0a30d08dca2cafb9daf252eb69",
+				"dweb:/ipfs/QmbShgMnzxdDxsvfMAat6tt9FcCnaZQSgZKHZWDM4nboSv"
+			]
+		}
+	},
+	"version": 1
+}

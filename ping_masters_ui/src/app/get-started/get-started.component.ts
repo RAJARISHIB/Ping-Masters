@@ -1,12 +1,14 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormArray, FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
+import { HttpErrorResponse } from '@angular/common/http';
 import { Router, RouterLink } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
 import { distinctUntilChanged, take } from 'rxjs/operators';
 import type { User } from 'firebase/auth';
 import { AuthService } from '../auth/auth.service';
 import currencyJson from '../asset/currency.json';
+import { UsersApiService } from '../api/users-api.service';
 
 type WalletAddress = { name: string; wallet_id: string };
 type CurrencyOption = { key: string; value: string; symbol?: string; emoji?: string };
@@ -22,6 +24,7 @@ export class GetStartedComponent {
   private readonly authService = inject(AuthService);
   private readonly router = inject(Router);
   private readonly fb = inject(FormBuilder);
+  private readonly usersApiService = inject(UsersApiService);
 
   readonly user$ = this.authService.user$;
 
@@ -150,6 +153,14 @@ export class GetStartedComponent {
       const mobileRaw = this.form.controls.mobile_number.value ?? '';
       const mobileNumber = mobileRaw.trim() ? mobileRaw.trim() : null;
 
+      await firstValueFrom(
+        this.usersApiService.createFromFirebase({
+          user_id: user.uid,
+          wallet_address: wallets,
+          notification_channels: notificationChannels
+        })
+      );
+
       await this.authService.saveGetStartedDetails(user.uid, {
         wallet_address: wallets,
         currency,
@@ -159,7 +170,7 @@ export class GetStartedComponent {
 
       await this.router.navigateByUrl('/login');
     } catch (error: unknown) {
-      this.error.set(error instanceof Error ? error.message : 'Failed to save. Please try again.');
+      this.error.set(this.humanizeError(error));
     } finally {
       this.saving.set(false);
     }
@@ -204,5 +215,14 @@ export class GetStartedComponent {
     const name = currency.value.toLowerCase();
     const symbol = (currency.symbol ?? '').toLowerCase();
     return key.includes(query) || name.includes(query) || symbol.includes(query);
+  }
+
+  private humanizeError(error: unknown): string {
+    if (error instanceof HttpErrorResponse) {
+      return `Request failed (${error.status}${error.statusText ? ` ${error.statusText}` : ''}).`;
+    }
+
+    if (error instanceof Error && error.message) return error.message;
+    return 'Failed to save. Please try again.';
   }
 }

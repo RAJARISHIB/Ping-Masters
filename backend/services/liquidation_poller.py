@@ -1,4 +1,13 @@
-"""Background liquidation poller service for Web3-enabled recovery automation."""
+"""Background liquidation poller service for Web3-enabled recovery automation.
+
+FIX APPLIED: Health factor from the contract is scaled by 1e18
+(i.e. ``1.0`` on-chain = ``1_000_000_000_000_000_000``).  The
+previous code compared the raw integer against ``float(1.0)`` which
+meant liquidation would **never** trigger.
+
+The fix divides the raw value by ``PRECISION`` (1e18) before comparing
+against the threshold.
+"""
 
 import asyncio
 import json
@@ -7,6 +16,7 @@ from typing import Any, Optional
 
 from web3 import Web3
 
+from common.protocol_constants import PRECISION, raw_to_human_hf
 from core.config import AppSettings
 
 
@@ -136,22 +146,41 @@ class LiquidationPoller:
             return None
 
     async def _evaluate_borrower(self, borrower_address: str) -> None:
-        """Check borrower health factor and trigger liquidation if required."""
+        """Check borrower health factor and trigger liquidation if required.
+
+        **FIX**: The contract returns health factor as a uint256 scaled
+        by 1e18 (``PRECISION``).  We convert to a human-readable float
+        before comparing against the threshold (default 1.0).
+        """
         if self._contract is None:
             return
 
         try:
             function = getattr(self._contract.functions, self._settings.liquidator_health_function)
-            health_factor = function(borrower_address).call()
+            raw_health_factor = function(borrower_address).call()
+
+            # ───────────────────────────────────────────────────────
+            # FIX: Convert 1e18-scaled integer to human-readable float
+            # Before: float(raw_health_factor) < threshold   — ALWAYS FALSE
+            # After:  raw_health_factor / 1e18 < threshold   — CORRECT
+            # ───────────────────────────────────────────────────────
+            human_hf = raw_to_human_hf(int(raw_health_factor))
             threshold = self._settings.liquidator_health_threshold
+
             logger.info(
-                "Borrower health checked borrower=%s health_factor=%s threshold=%s",
+                "Borrower health checked borrower=%s raw_hf=%s human_hf=%.6f threshold=%s",
                 borrower_address,
-                health_factor,
+                raw_health_factor,
+                human_hf,
                 threshold,
             )
-            if float(health_factor) < threshold:
-                logger.warning("Borrower below threshold. Triggering liquidation borrower=%s", borrower_address)
+
+            if human_hf < threshold:
+                logger.warning(
+                    "Borrower below threshold. Triggering liquidation borrower=%s human_hf=%.6f",
+                    borrower_address,
+                    human_hf,
+                )
                 self._execute_liquidation(borrower_address)
         except Exception:
             logger.exception("Failed borrower evaluation borrower=%s", borrower_address)

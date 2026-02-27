@@ -1,0 +1,3 @@
+# This directory holds serialised models and metadata.
+# Files are created by the training pipeline:
+#   python -m ml.training.run_training

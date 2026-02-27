@@ -1,0 +1,664 @@
+{
+	"compiler": {
+		"version": "0.8.31+commit.fd3a2265"
+	},
+	"language": "Solidity",
+	"output": {
+		"abi": [
+			{
+				"inputs": [],
+				"stateMutability": "nonpayable",
+				"type": "constructor"
+			},
+			{
+				"inputs": [],
+				"name": "InvalidCurrency",
+				"type": "error"
+			},
+			{
+				"inputs": [],
+				"name": "InvalidRecord",
+				"type": "error"
+			},
+			{
+				"inputs": [],
+				"name": "RecordNotFound",
+				"type": "error"
+			},
+			{
+				"inputs": [],
+				"name": "Unauthorized",
+				"type": "error"
+			},
+			{
+				"inputs": [],
+				"name": "ZeroAddress",
+				"type": "error"
+			},
+			{
+				"anonymous": false,
+				"inputs": [
+					{
+						"indexed": true,
+						"internalType": "uint256",
+						"name": "recordId",
+						"type": "uint256"
+					},
+					{
+						"indexed": true,
+						"internalType": "address",
+						"name": "borrower",
+						"type": "address"
+					},
+					{
+						"indexed": true,
+						"internalType": "address",
+						"name": "liquidator",
+						"type": "address"
+					},
+					{
+						"indexed": false,
+						"internalType": "uint256",
+						"name": "debtRepaid",
+						"type": "uint256"
+					},
+					{
+						"indexed": false,
+						"internalType": "uint256",
+						"name": "collateralSeized",
+						"type": "uint256"
+					},
+					{
+						"indexed": false,
+						"internalType": "uint8",
+						"name": "currency",
+						"type": "uint8"
+					},
+					{
+						"indexed": false,
+						"internalType": "bytes32",
+						"name": "bscTxHash",
+						"type": "bytes32"
+					}
+				],
+				"name": "LiquidationLogged",
+				"type": "event"
+			},
+			{
+				"anonymous": false,
+				"inputs": [
+					{
+						"indexed": true,
+						"internalType": "address",
+						"name": "bot",
+						"type": "address"
+					}
+				],
+				"name": "LoggerBotUpdated",
+				"type": "event"
+			},
+			{
+				"anonymous": false,
+				"inputs": [
+					{
+						"indexed": true,
+						"internalType": "address",
+						"name": "previous",
+						"type": "address"
+					},
+					{
+						"indexed": true,
+						"internalType": "address",
+						"name": "next_",
+						"type": "address"
+					}
+				],
+				"name": "OwnershipTransferred",
+				"type": "event"
+			},
+			{
+				"inputs": [],
+				"name": "CURRENCY_INR",
+				"outputs": [
+					{
+						"internalType": "uint8",
+						"name": "",
+						"type": "uint8"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "CURRENCY_USD",
+				"outputs": [
+					{
+						"internalType": "uint8",
+						"name": "",
+						"type": "uint8"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "getGlobalStats",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "totalEvents",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "totalUSD",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "totalINR",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "totalBNBSeized",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "uint256",
+						"name": "recordId",
+						"type": "uint256"
+					}
+				],
+				"name": "getLiquidation",
+				"outputs": [
+					{
+						"components": [
+							{
+								"internalType": "address",
+								"name": "borrower",
+								"type": "address"
+							},
+							{
+								"internalType": "address",
+								"name": "liquidator",
+								"type": "address"
+							},
+							{
+								"internalType": "uint256",
+								"name": "debtRepaid",
+								"type": "uint256"
+							},
+							{
+								"internalType": "uint256",
+								"name": "collateralSeized",
+								"type": "uint256"
+							},
+							{
+								"internalType": "uint256",
+								"name": "bonusSeized",
+								"type": "uint256"
+							},
+							{
+								"internalType": "uint8",
+								"name": "currency",
+								"type": "uint8"
+							},
+							{
+								"internalType": "uint256",
+								"name": "timestamp",
+								"type": "uint256"
+							},
+							{
+								"internalType": "uint256",
+								"name": "bscBlockNumber",
+								"type": "uint256"
+							},
+							{
+								"internalType": "bytes32",
+								"name": "bscTxHash",
+								"type": "bytes32"
+							}
+						],
+						"internalType": "struct LiquidationArchive.LiquidationRecord",
+						"name": "",
+						"type": "tuple"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "address",
+						"name": "borrower",
+						"type": "address"
+					}
+				],
+				"name": "getLiquidationsByBorrower",
+				"outputs": [
+					{
+						"internalType": "uint256[]",
+						"name": "ids",
+						"type": "uint256[]"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "uint256",
+						"name": "offset",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "pageSize",
+						"type": "uint256"
+					}
+				],
+				"name": "getLiquidationsPaginated",
+				"outputs": [
+					{
+						"components": [
+							{
+								"internalType": "address",
+								"name": "borrower",
+								"type": "address"
+							},
+							{
+								"internalType": "address",
+								"name": "liquidator",
+								"type": "address"
+							},
+							{
+								"internalType": "uint256",
+								"name": "debtRepaid",
+								"type": "uint256"
+							},
+							{
+								"internalType": "uint256",
+								"name": "collateralSeized",
+								"type": "uint256"
+							},
+							{
+								"internalType": "uint256",
+								"name": "bonusSeized",
+								"type": "uint256"
+							},
+							{
+								"internalType": "uint8",
+								"name": "currency",
+								"type": "uint8"
+							},
+							{
+								"internalType": "uint256",
+								"name": "timestamp",
+								"type": "uint256"
+							},
+							{
+								"internalType": "uint256",
+								"name": "bscBlockNumber",
+								"type": "uint256"
+							},
+							{
+								"internalType": "bytes32",
+								"name": "bscTxHash",
+								"type": "bytes32"
+							}
+						],
+						"internalType": "struct LiquidationArchive.LiquidationRecord[]",
+						"name": "page",
+						"type": "tuple[]"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "getTotalRecords",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "address",
+						"name": "",
+						"type": "address"
+					}
+				],
+				"name": "liquidationCount",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "uint256",
+						"name": "",
+						"type": "uint256"
+					}
+				],
+				"name": "liquidations",
+				"outputs": [
+					{
+						"internalType": "address",
+						"name": "borrower",
+						"type": "address"
+					},
+					{
+						"internalType": "address",
+						"name": "liquidator",
+						"type": "address"
+					},
+					{
+						"internalType": "uint256",
+						"name": "debtRepaid",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "collateralSeized",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "bonusSeized",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint8",
+						"name": "currency",
+						"type": "uint8"
+					},
+					{
+						"internalType": "uint256",
+						"name": "timestamp",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "bscBlockNumber",
+						"type": "uint256"
+					},
+					{
+						"internalType": "bytes32",
+						"name": "bscTxHash",
+						"type": "bytes32"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "address",
+						"name": "borrower",
+						"type": "address"
+					},
+					{
+						"internalType": "address",
+						"name": "liquidator",
+						"type": "address"
+					},
+					{
+						"internalType": "uint256",
+						"name": "debtRepaid",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "collateralSeized",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "bonusSeized",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint8",
+						"name": "currency",
+						"type": "uint8"
+					},
+					{
+						"internalType": "uint256",
+						"name": "bscBlockNumber",
+						"type": "uint256"
+					},
+					{
+						"internalType": "bytes32",
+						"name": "bscTxHash",
+						"type": "bytes32"
+					}
+				],
+				"name": "logLiquidation",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "recordId",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "nonpayable",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "loggerBot",
+				"outputs": [
+					{
+						"internalType": "address",
+						"name": "",
+						"type": "address"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "owner",
+				"outputs": [
+					{
+						"internalType": "address",
+						"name": "",
+						"type": "address"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "address",
+						"name": "bot",
+						"type": "address"
+					}
+				],
+				"name": "setLoggerBot",
+				"outputs": [],
+				"stateMutability": "nonpayable",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "totalCollateralSeized",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "totalDebtRepaidINR",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "totalDebtRepaidUSD",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [],
+				"name": "totalLiquidationEvents",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
+						"internalType": "address",
+						"name": "newOwner",
+						"type": "address"
+					}
+				],
+				"name": "transferOwnership",
+				"outputs": [],
+				"stateMutability": "nonpayable",
+				"type": "function"
+			}
+		],
+		"devdoc": {
+			"kind": "dev",
+			"methods": {
+				"getGlobalStats()": {
+					"returns": {
+						"totalBNBSeized": "  Cumulative BNB seized (wei).",
+						"totalEvents": "     Total liquidations ever logged.",
+						"totalINR": "        Cumulative pmINR repaid (18-dec).",
+						"totalUSD": "        Cumulative pmUSD repaid (18-dec)."
+					}
+				},
+				"logLiquidation(address,address,uint256,uint256,uint256,uint8,uint256,bytes32)": {
+					"params": {
+						"bonusSeized": "Bonus BNB portion (wei).",
+						"borrower": "Address liquidated on BSC.",
+						"bscBlockNumber": "BSC block number of the liquidation tx.",
+						"bscTxHash": "BSC transaction hash (cross-chain proof).",
+						"collateralSeized": "Total BNB seized including bonus (wei).",
+						"currency": "0 = USD, 1 = INR.",
+						"debtRepaid": "pmUSD or pmINR repaid (18-decimal).",
+						"liquidator": "Address that called liquidate() on BSC."
+					},
+					"returns": {
+						"recordId": "        Index of the new record in the array."
+					}
+				}
+			},
+			"title": "LiquidationArchive",
+			"version": 1
+		},
+		"userdoc": {
+			"kind": "user",
+			"methods": {
+				"CURRENCY_USD()": {
+					"notice": "Mirrors PriceConsumer.Currency without importing the contract."
+				},
+				"getGlobalStats()": {
+					"notice": "Protocol-wide stats — feeds the dashboard UI."
+				},
+				"getLiquidation(uint256)": {
+					"notice": "Get a single record by ID."
+				},
+				"getLiquidationsByBorrower(address)": {
+					"notice": "All record IDs where `borrower` was the target."
+				},
+				"getLiquidationsPaginated(uint256,uint256)": {
+					"notice": "Paginated history for the UI (lazy-load the table)."
+				},
+				"logLiquidation(address,address,uint256,uint256,uint256,uint8,uint256,bytes32)": {
+					"notice": "Record a completed BSC liquidation.         Called by the FastAPI bot after the BSC tx is confirmed."
+				},
+				"setLoggerBot(address)": {
+					"notice": "Authorise the FastAPI bot wallet to log liquidations."
+				}
+			},
+			"notice": "Permanent, low-cost liquidation ledger deployed on opBNB Testnet.         After every successful BSC liquidation, the FastAPI bot sends a         logLiquidation() transaction here.  opBNB fees are near-zero, so         every event is permanently and cheaply archived.         Each record now includes the debt currency (USD=0 / INR=1) so the         dashboard can display amounts with the correct symbol and format.",
+			"version": 1
+		}
+	},
+	"settings": {
+		"compilationTarget": {
+			"contracts/src/LiquidationArchive.sol": "LiquidationArchive"
+		},
+		"evmVersion": "osaka",
+		"libraries": {},
+		"metadata": {
+			"bytecodeHash": "ipfs"
+		},
+		"optimizer": {
+			"enabled": false,
+			"runs": 200
+		},
+		"remappings": []
+	},
+	"sources": {
+		"contracts/src/LiquidationArchive.sol": {
+			"keccak256": "0x2c1911b0a7c339bf6320afc62c2aeeab0be2771b3c743b45b072fadf166e2b3e",
+			"license": "MIT",
+			"urls": [
+				"bzz-raw://bae8b0473395b2ac2136c9aa9eb5e4b7c8a3049e625d16842d2fb1aab4e1ab1e",
+				"dweb:/ipfs/QmWyLJzk7fJUJ7MeQfJz3qAiKtySfpAdcW7RPEwsbQqupX"
+			]
+		}
+	},
+	"version": 1
+}

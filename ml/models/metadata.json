@@ -1,0 +1,42 @@
+{
+  "model_version": "v2.0",
+  "training_date": "2026-02-27T17:35:32.983719+00:00",
+  "dataset_path": "D:\\BNB Hackathon\\Ping-Masters\\ml\\training\\dataset.csv",
+  "dataset_samples": 15000,
+  "class_distribution": {
+    "label_0": 8285,
+    "label_1": 6715,
+    "label_1_ratio": 0.4477
+  },
+  "test_size": 0.2,
+  "feature_names": [
+    "collateral_bnb",
+    "debt_fiat",
+    "price_current",
+    "volatility_estimate"
+  ],
+  "feature_importance": {
+    "debt_fiat": 0.3798801302909851,
+    "collateral_bnb": 0.2510097622871399,
+    "price_current": 0.22374606132507324,
+    "volatility_estimate": 0.14536406099796295
+  },
+  "metrics": {
+    "logistic_regression": {
+      "accuracy": 0.82,
+      "precision": 0.8153967007069913,
+      "recall": 0.7728965003723008,
+      "brier_score": 0.1283119654645962,
+      "auc_roc": 0.8979253160512657,
+      "training_seconds": 0.085
+    },
+    "xgboost": {
+      "accuracy": 0.9503333333333334,
+      "precision": 0.9536474164133738,
+      "recall": 0.9344750558451228,
+      "brier_score": 0.04465441033244133,
+      "auc_roc": 0.9918156731230264,
+      "training_seconds": 2.365
+    }
+  }
+}
