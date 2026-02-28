@@ -199,6 +199,7 @@ flowchart TB
 - Solidity/API mapping: [backend/SOLIDITY_API_DOCUMENTATION.md](backend/SOLIDITY_API_DOCUMENTATION.md)
 - Firestore storage map: [backend/FIREBASE_STORAGE.md](backend/FIREBASE_STORAGE.md)
 - User flow notes: [user_flow.md](user_flow.md)
+- Architecture Diagram: [backend/ARCHITECTURE.md](backend/ARCHITECTURE.md)
 
 ---
 
