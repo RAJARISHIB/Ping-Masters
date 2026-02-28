@@ -324,7 +324,7 @@ export interface RazorpaySuccessResponse {
 
 @Injectable({ providedIn: 'root' })
 export class ApiService {
-  private readonly base = environment.apiUrl;
+  private readonly base = environment.apiUrl.replace(/\/+$/, '');
 
   constructor(private http: HttpClient) {}
 

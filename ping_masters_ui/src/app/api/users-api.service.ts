@@ -11,7 +11,7 @@ export type FromFirebaseUserPayload = {
 @Injectable({ providedIn: 'root' })
 export class UsersApiService {
   private readonly http = inject(HttpClient);
-  private readonly baseUrl = environment.apiUrl;
+  private readonly baseUrl = environment.apiUrl.replace(/\/+$/, '');
 
   createFromFirebase(payload: FromFirebaseUserPayload) {
     const allowedChannels = new Set(['email', 'whatsapp']);
