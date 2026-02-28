@@ -4,8 +4,10 @@ import { FormsModule } from "@angular/forms";
 import { firstValueFrom } from "rxjs";
 import { SharedModule } from "../../../app.module";
 import { ApiService } from "../../../services/api.service";
+import { CurrencySymbolService } from "../../../services/currency-symbol.service";
 
 interface LoanSummary {
+    userId?: string;
     loanName: string;
     amount: number;
     installments: number;
@@ -15,7 +17,10 @@ interface LoanSummary {
     liquidationPrice: number;
     collateralRequired: number;
     bnbPrice: number;
+    bnbPriceUsd?: number;
     walletAddress?: string;
+    currencyCode?: string;
+    currencySymbol?: string;
 }
 
 interface Wallet {
@@ -57,16 +62,12 @@ interface TxStep {
     imports: [SharedModule, FormsModule],
 })
 export class Transaction implements OnInit, OnDestroy {
-
-    // ── Loan data from router state ────────────────────────────
     loan: LoanSummary | null = null;
 
-    // ── Wallets ────────────────────────────────────────────────
     wallets: Wallet[] = [];
     selectedWalletAddress = "";
     walletsLoading = false;
 
-    // ── Bank accounts ──────────────────────────────────────────
     bankAccounts: BankAccount[] = [
         {
             id: "ba-001",
@@ -87,7 +88,6 @@ export class Transaction implements OnInit, OnDestroy {
     ];
     selectedBankId = "ba-001";
 
-    // ── Add bank form (shown when no bank accounts) ────────────
     showAddBankForm = false;
     newBank = {
         accountHolder: "",
@@ -96,6 +96,24 @@ export class Transaction implements OnInit, OnDestroy {
         confirmAccountNumber: "",
         ifsc: "",
     };
+
+    txStatus: "idle" | "processing" | "success" | "failed" = "idle";
+    showConfirmDialog = false;
+    steps: TxStep[] = [
+        { label: "Initiating transaction", sublabel: "Broadcasting to blockchain network", done: false, active: false, failed: false },
+        { label: "Locking BNB collateral", sublabel: "Executing smart contract deposit", done: false, active: false, failed: false },
+        { label: "Smart contract approval", sublabel: "Verifying collateral ratio and credit", done: false, active: false, failed: false },
+        { label: "Transfer to bank", sublabel: "Disbursing funds to linked account", done: false, active: false, failed: false },
+    ];
+    currentStep = -1;
+
+    toasters: Toaster[] = [];
+    private toastCounter = 0;
+    private timers: any[] = [];
+
+    userCurrencyCode = "USD";
+    userCurrencySymbol = "$";
+
     get newBankValid(): boolean {
         return !!(
             this.newBank.accountHolder.trim() &&
@@ -106,37 +124,28 @@ export class Transaction implements OnInit, OnDestroy {
         );
     }
 
-    // ── Transaction state ──────────────────────────────────────
-    txStatus: "idle" | "processing" | "success" | "failed" = "idle";
-    showConfirmDialog = false;
-    steps: TxStep[] = [
-        { label: "Initiating transaction", sublabel: "Broadcasting to blockchain network", done: false, active: false, failed: false },
-        { label: "Locking BNB collateral", sublabel: "Executing smart contract deposit", done: false, active: false, failed: false },
-        { label: "Smart contract approval", sublabel: "Verifying collateral ratio & credit", done: false, active: false, failed: false },
-        { label: "INR transfer to bank", sublabel: "Disbursing funds to linked account", done: false, active: false, failed: false },
-    ];
-    currentStep = -1;
-
-    // ── Toasters ───────────────────────────────────────────────
-    toasters: Toaster[] = [];
-    private toastCounter = 0;
-    private timers: any[] = [];
-
-    // ── Helpers ────────────────────────────────────────────────
     get selectedWallet(): Wallet | undefined {
-        return this.wallets.find(w => w.address === this.selectedWalletAddress);
+        return this.wallets.find((w) => w.address === this.selectedWalletAddress);
     }
+
     get selectedBank(): BankAccount | undefined {
-        return this.bankAccounts.find(b => b.id === this.selectedBankId);
+        return this.bankAccounts.find((b) => b.id === this.selectedBankId);
     }
+
     get hasBankAccounts(): boolean {
         return this.bankAccounts.length > 0;
     }
+
+    get currencySymbol(): string {
+        return this.loan?.currencySymbol || this.userCurrencySymbol;
+    }
+
     get walletHasSufficientBnb(): boolean {
         return !this.loan || !this.selectedWallet
             ? false
-            : this.selectedWallet.bnbBalance >= (this.loan.collateralRequired);
+            : this.selectedWallet.bnbBalance >= this.loan.collateralRequired;
     }
+
     get canConfirm(): boolean {
         return (
             this.txStatus === "idle" &&
@@ -146,11 +155,20 @@ export class Transaction implements OnInit, OnDestroy {
         );
     }
 
-    constructor(public router: Router, private cdr: ChangeDetectorRef, private api: ApiService) {}
+    constructor(
+        public router: Router,
+        private cdr: ChangeDetectorRef,
+        private api: ApiService,
+        private currencySymbols: CurrencySymbolService,
+    ) {}
 
     ngOnInit(): void {
+        this.userCurrencySymbol = this.currencySymbols.resolveSymbol(this.userCurrencyCode);
+        this.loadUserCurrencyContext();
+
         const state = history.state as Partial<LoanSummary>;
         if (state?.amount) {
+            const fallbackCurrencyCode = String(state.currencyCode || this.userCurrencyCode || "USD").toUpperCase();
             this.loan = {
                 loanName: state.loanName ?? "Unnamed Loan",
                 amount: state.amount ?? 0,
@@ -161,21 +179,53 @@ export class Transaction implements OnInit, OnDestroy {
                 liquidationPrice: state.liquidationPrice ?? 0,
                 collateralRequired: state.collateralRequired ?? 0,
                 bnbPrice: state.bnbPrice ?? 0,
+                bnbPriceUsd: state.bnbPriceUsd ?? 0,
                 walletAddress: state.walletAddress,
+                currencyCode: fallbackCurrencyCode,
+                currencySymbol: state.currencySymbol ?? this.currencySymbols.resolveSymbol(fallbackCurrencyCode, this.userCurrencyCode),
             };
         }
+
         this.selectedWalletAddress = state.walletAddress || sessionStorage.getItem("connected_wallet") || "";
         this.loadWallets();
-        // If no bank accounts, default show add form
+
         if (!this.hasBankAccounts) {
             this.showAddBankForm = true;
         }
+    }
+
+    ngOnDestroy(): void {
+        this.timers.forEach((timer) => clearTimeout(timer));
+    }
+
+    private loadUserCurrencyContext(): void {
+        const userId = sessionStorage.getItem("user_id") || "";
+        if (!userId) return;
+
+        this.api.getUser(userId).subscribe({
+            next: (user) => {
+                const code = String(user?.currency_code || this.userCurrencyCode || "USD").toUpperCase();
+                this.userCurrencyCode = code;
+                this.userCurrencySymbol = this.currencySymbols.resolveSymbol(code);
+
+                if (this.loan) {
+                    const loanCurrencyCode = String(this.loan.currencyCode || code).toUpperCase();
+                    this.loan.currencyCode = loanCurrencyCode;
+                    this.loan.currencySymbol = this.currencySymbols.resolveSymbol(loanCurrencyCode, code);
+                }
+            },
+            error: () => {
+                this.userCurrencyCode = "USD";
+                this.userCurrencySymbol = this.currencySymbols.resolveSymbol("USD");
+            },
+        });
     }
 
     private loadWallets(): void {
         const userId = sessionStorage.getItem("user_id") || "user_001";
         const connectedWallet = this.selectedWalletAddress;
         this.walletsLoading = true;
+
         this.api.getUserWallets(userId).subscribe({
             next: (res) => {
                 let wallets = (res.wallet_address || []).map((entry, index) => ({
@@ -233,13 +283,9 @@ export class Transaction implements OnInit, OnDestroy {
         });
     }
 
-    ngOnDestroy(): void {
-        this.timers.forEach(t => clearTimeout(t));
-    }
-
     goBack(): void {
-        if (this.txStatus === 'success') {
-            sessionStorage.removeItem('borrow_form');
+        if (this.txStatus === "success") {
+            sessionStorage.removeItem("borrow_form");
             this.router.navigate(["/board"]);
             return;
         }
@@ -249,16 +295,16 @@ export class Transaction implements OnInit, OnDestroy {
     saveNewBank(): void {
         if (!this.newBankValid) return;
         const last4 = this.newBank.accountNumber.slice(-4);
-        const nb: BankAccount = {
-            id: "ba-new-" + Date.now(),
+        const newBank: BankAccount = {
+            id: `ba-new-${Date.now()}`,
             bank: this.newBank.bankName,
             accountNumber: this.newBank.accountNumber,
-            displayNumber: "****" + last4,
+            displayNumber: `****${last4}`,
             ifsc: this.newBank.ifsc.toUpperCase(),
             name: this.newBank.accountHolder,
         };
-        this.bankAccounts.push(nb);
-        this.selectedBankId = nb.id;
+        this.bankAccounts.push(newBank);
+        this.selectedBankId = newBank.id;
         this.showAddBankForm = false;
         this.newBank = { accountHolder: "", bankName: "", accountNumber: "", confirmAccountNumber: "", ifsc: "" };
     }
@@ -282,23 +328,23 @@ export class Transaction implements OnInit, OnDestroy {
         });
     }
 
-    private setStep(i: number): void {
-        this.currentStep = i;
-        this.steps[i].active = true;
-        this.steps[i].done = false;
+    private setStep(index: number): void {
+        this.currentStep = index;
+        this.steps[index].active = true;
+        this.steps[index].done = false;
         this.cdr.detectChanges();
     }
 
-    private completeStep(i: number): void {
-        this.steps[i].active = false;
-        this.steps[i].done = true;
+    private completeStep(index: number): void {
+        this.steps[index].active = false;
+        this.steps[index].done = true;
         this.cdr.detectChanges();
     }
 
     private delay(ms: number): Promise<void> {
-        return new Promise((res) => {
-            const t = setTimeout(res, ms);
-            this.timers.push(t);
+        return new Promise((resolve) => {
+            const timer = setTimeout(resolve, ms);
+            this.timers.push(timer);
         });
     }
 
@@ -307,71 +353,60 @@ export class Transaction implements OnInit, OnDestroy {
         const wallet = this.selectedWallet;
         const userId = sessionStorage.getItem("user_id") || "user_001";
         const principalMinor = ApiService.toPaise(loan.amount);
+        const currencyCode = loan.currencyCode || this.userCurrencyCode || "USD";
         const collateralBnb = loan.collateralRequired;
         const oraclePriceMinor = ApiService.toPaise(loan.bnbPrice);
 
-        // ── Step 1: Create BNPL plan ──────────────────────────
         this.setStep(0);
-        const planRes = await firstValueFrom(this.api
-            .createBnplPlan({
-                user_id: userId,
-                merchant_id: "merchant_001",
-                principal_minor: principalMinor,
-                currency: "INR",
-                installment_count: loan.installments,
-                tenure_days: loan.installments * 30,
-                ltv_bps: 6667,   // 66.67% LTV
-                collateral_asset: "BNB",
-                oracle_price_minor: oraclePriceMinor,
-            }));
-
-        const loanId: string = (planRes as any)?.loan?.id ?? "loan-" + Date.now();
+        const planRes = await firstValueFrom(this.api.createBnplPlan({
+            user_id: userId,
+            merchant_id: "merchant_001",
+            principal_minor: principalMinor,
+            currency: currencyCode,
+            installment_count: loan.installments,
+            tenure_days: loan.installments * 30,
+            ltv_bps: 6667,
+            collateral_asset: "BNB",
+            oracle_price_minor: oraclePriceMinor,
+        }));
+        const loanId: string = (planRes as any)?.loan?.id ?? `loan-${Date.now()}`;
         await this.delay(900);
         this.completeStep(0);
 
-        // ── Step 2: Lock collateral ───────────────────────────
         this.setStep(1);
-        await firstValueFrom(this.api
-            .lockCollateral({
-                loan_id: loanId,
-                user_id: userId,
-                asset_symbol: "BNB",
-                deposited_units: collateralBnb,
-                collateral_value_minor: Math.round(collateralBnb * oraclePriceMinor),
-                oracle_price_minor: oraclePriceMinor,
-                vault_address: wallet?.address ?? "0x0000",
-                chain_id: "97",    // BSC testnet
-                deposit_tx_hash: "0xsimulated" + Date.now(),
-            }));
+        await firstValueFrom(this.api.lockCollateral({
+            loan_id: loanId,
+            user_id: userId,
+            asset_symbol: "BNB",
+            deposited_units: collateralBnb,
+            collateral_value_minor: Math.round(collateralBnb * oraclePriceMinor),
+            oracle_price_minor: oraclePriceMinor,
+            vault_address: wallet?.address ?? "0x0000",
+            chain_id: "97",
+            deposit_tx_hash: `0xsimulated${Date.now()}`,
+        }));
         await this.delay(900);
         this.completeStep(1);
 
-        // ── Step 3: Create autopay mandate ───────────────────
         this.setStep(2);
-        await firstValueFrom(this.api
-            .createAutopayMandate({
-                user_id: userId,
-                loan_id: loanId,
-                amount_minor: ApiService.toPaise(loan.emiAmount),
-                currency: "INR",
-            }));
+        await firstValueFrom(this.api.createAutopayMandate({
+            user_id: userId,
+            loan_id: loanId,
+            amount_minor: ApiService.toPaise(loan.emiAmount),
+            currency: currencyCode,
+        }));
         await this.delay(900);
         this.completeStep(2);
 
-        // ── Step 4: Razorpay checkout for INR disbursement ───
         this.setStep(3);
         const razorpayStatus = await firstValueFrom(this.api.getRazorpayStatus());
         if (!razorpayStatus.available) {
             throw new Error("Razorpay is unavailable");
         }
-        await this.api.openRazorpayCheckout(
-            principalMinor,
-            `Loan disbursement — ${loan.loanName}`,
-        );
+        await this.api.openRazorpayCheckout(principalMinor, currencyCode, `Loan disbursement - ${loan.loanName}`);
         await this.delay(600);
         this.completeStep(3);
 
-        // ── Success ──────────────────────────────────────────
         this.txStatus = "success";
         this.currentStep = 4;
         this.cdr.detectChanges();
@@ -388,16 +423,16 @@ export class Transaction implements OnInit, OnDestroy {
         const id = ++this.toastCounter;
         this.toasters.push({ id, type, title, message, visible: true });
         this.cdr.detectChanges();
-        const dt = setTimeout(() => {
-            const toast = this.toasters.find(x => x.id === id);
+        const dismissTimer = setTimeout(() => {
+            const toast = this.toasters.find((entry) => entry.id === id);
             if (toast) toast.visible = false;
             this.cdr.detectChanges();
             setTimeout(() => {
-                this.toasters = this.toasters.filter(x => x.id !== id);
+                this.toasters = this.toasters.filter((entry) => entry.id !== id);
                 this.cdr.detectChanges();
             }, 400);
         }, 5000);
-        this.timers.push(dt);
+        this.timers.push(dismissTimer);
     }
 
     private fireToasters(): void {
@@ -409,7 +444,7 @@ export class Transaction implements OnInit, OnDestroy {
                 delay: 200,
                 type: "info",
                 title: "Transaction Submitted",
-                message: `Broadcasting to BNB Smart Chain…`,
+                message: "Broadcasting to BNB Smart Chain...",
             },
             {
                 delay: 1600,
@@ -420,50 +455,48 @@ export class Transaction implements OnInit, OnDestroy {
             {
                 delay: 3200,
                 type: "success",
-                title: "Contract Approved ✓",
-                message: `Loan smart contract executed successfully`,
+                title: "Contract Approved",
+                message: "Loan smart contract executed successfully",
             },
             {
                 delay: 4800,
                 type: "success",
-                title: "Funds Disbursed 🎉",
-                message: `₹${this.loan.amount.toLocaleString("en-IN")} transferred to ${bank?.bank ?? "your bank"} ${bank?.displayNumber ?? ""}`,
+                title: "Funds Disbursed",
+                message: `${this.currencySymbol}${this.loan.amount.toLocaleString("en-IN")} transferred to ${bank?.bank ?? "your bank"} ${bank?.displayNumber ?? ""}`,
             },
         ];
 
         msgs.forEach(({ delay, type, title, message }) => {
-            const t = setTimeout(() => {
+            const timer = setTimeout(() => {
                 const id = ++this.toastCounter;
                 this.toasters.push({ id, type, title, message, visible: true });
                 this.cdr.detectChanges();
-                // auto-dismiss after 4s
-                const dt = setTimeout(() => {
-                    const toast = this.toasters.find(x => x.id === id);
+                const dismissTimer = setTimeout(() => {
+                    const toast = this.toasters.find((entry) => entry.id === id);
                     if (toast) toast.visible = false;
                     this.cdr.detectChanges();
-                    // remove from array after slide-out animation
                     setTimeout(() => {
-                        this.toasters = this.toasters.filter(x => x.id !== id);
+                        this.toasters = this.toasters.filter((entry) => entry.id !== id);
                         this.cdr.detectChanges();
                     }, 400);
                 }, 4000);
-                this.timers.push(dt);
+                this.timers.push(dismissTimer);
             }, delay);
-            this.timers.push(t);
+            this.timers.push(timer);
         });
     }
 
     dismissToast(id: number): void {
-        const t = this.toasters.find(x => x.id === id);
-        if (t) t.visible = false;
+        const toast = this.toasters.find((entry) => entry.id === id);
+        if (toast) toast.visible = false;
         this.cdr.detectChanges();
         setTimeout(() => {
-            this.toasters = this.toasters.filter(x => x.id !== id);
+            this.toasters = this.toasters.filter((entry) => entry.id !== id);
             this.cdr.detectChanges();
         }, 400);
     }
 
     formatAddress(addr: string): string {
-        return addr.slice(0, 6) + "…" + addr.slice(-4);
+        return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
     }
 }

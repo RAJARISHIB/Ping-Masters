@@ -56,13 +56,13 @@
                     <!-- Entry Price -->
                     <div class="stat-cell">
                         <span class="stat-label">Entry Price</span>
-                        <span class="stat-value">${{ loan.entryPrice.toFixed(2) }}</span>
+                        <span class="stat-value">{{ loan.currencySymbol }}{{ loan.entryPrice.toFixed(2) }}</span>
                     </div>
                     <!-- Current Price -->
                     <div class="stat-cell">
                         <span class="stat-label">Current Price</span>
                         <div class="flex items-center gap-2">
-                            <span class="stat-value">${{ loan.currentPrice.toFixed(2) }}</span>
+                            <span class="stat-value">{{ loan.currencySymbol }}{{ loan.currentPrice.toFixed(2) }}</span>
                             <span class="price-delta"
                                 [class.delta-up]="priceChange >= 0"
                                 [class.delta-down]="priceChange < 0">
@@ -73,7 +73,7 @@
                     <!-- Liquidation Price -->
                     <div class="stat-cell">
                         <span class="stat-label">Liquidation Price</span>
-                        <span class="stat-value text-red-500">${{ loan.liquidationPrice.toFixed(2) }}</span>
+                        <span class="stat-value text-red-500">{{ loan.currencySymbol }}{{ loan.liquidationPrice.toFixed(2) }}</span>
                     </div>
                     <!-- Safety Margin -->
                     <div class="stat-cell">

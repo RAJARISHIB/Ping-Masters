@@ -2,7 +2,10 @@ import { Component, OnInit } from "@angular/core";
 import { ActivatedRoute, Router } from "@angular/router";
 import { SharedModule } from "../../../app.module";
 import { FormsModule } from "@angular/forms";
+import { forkJoin, of } from "rxjs";
+import { catchError, finalize } from "rxjs/operators";
 import { ApiService } from "../../../services/api.service";
+import { CurrencySymbolService } from "../../../services/currency-symbol.service";
 
 interface Installment {
     number: number;
@@ -14,6 +17,8 @@ interface Installment {
 interface LoanData {
     id: string;
     title: string;
+    currencyCode: string;
+    currencySymbol: string;
     collateralAsset: string;
     collateralAmount: number;
     entryPrice: number;
@@ -49,175 +54,169 @@ export class LoanDetails implements OnInit {
     explainabilityReasons: string[] = [];
     recommendedTopupToken = 0;
     safetyColor = "";
+    userId = "";
+    userCurrencyCode = "USD";
+    userCurrencySymbol = "$";
 
     get priceChange(): number {
-        if (!this.loan) return 0;
+        if (!this.loan || !this.loan.entryPrice) return 0;
         return ((this.loan.currentPrice - this.loan.entryPrice) / this.loan.entryPrice) * 100;
     }
 
     get progressPercent(): number {
-        if (!this.loan) return 0;
+        if (!this.loan || !this.loan.totalInstallments) return 0;
         return Math.round((this.loan.paidInstallments / this.loan.totalInstallments) * 100);
     }
 
     get marginFromLiquidation(): number {
-        if (!this.loan) return 0;
+        if (!this.loan || !this.loan.currentPrice) return 0;
         return ((this.loan.currentPrice - this.loan.liquidationPrice) / this.loan.currentPrice) * 100;
     }
 
-    constructor(private route: ActivatedRoute, private router: Router, private api: ApiService) {}
+    constructor(
+        private route: ActivatedRoute,
+        private router: Router,
+        private api: ApiService,
+        private currencySymbols: CurrencySymbolService,
+    ) {}
 
     ngOnInit(): void {
+        this.userId = sessionStorage.getItem("user_id") || "user_001";
+        this.loadUserCurrencyContext();
         const id = this.route.snapshot.paramMap.get("id") || "";
         if (!id) return;
-        this.loadRazorpayStatus();
         this.loadLoan(id);
     }
 
-    private loadRazorpayStatus(): void {
-        this.api.getRazorpayStatus().subscribe({
-            next: (res) => {
-                this.razorpayAvailable = !!res.available;
-            },
-            error: () => {
-                this.razorpayAvailable = false;
-            },
+    private loadUserCurrencyContext(): void {
+        if (!this.userId) return;
+        this.api.getUser(this.userId).pipe(catchError(() => of(null))).subscribe((user) => {
+            const code = String(user?.currency_code || this.userCurrencyCode || "USD").toUpperCase();
+            this.userCurrencyCode = code;
+            this.userCurrencySymbol = this.currencySymbols.resolveSymbol(code);
+            if (this.loan) {
+                const resolvedCode = this.loan.currencyCode || this.userCurrencyCode;
+                this.loan.currencyCode = resolvedCode;
+                this.loan.currencySymbol = this.currencySymbols.resolveSymbol(resolvedCode, this.userCurrencyCode);
+            }
         });
     }
 
     private loadLoan(id: string): void {
         this.loading = true;
-
-        this.api.getBnplSafetyMeter(id).subscribe({
-            next: (safetyRes) => {
-                this.safetyColor = String(safetyRes.safety_color || "");
-                this.api.getBnplProof(id).subscribe({
-                    next: (proofRes) => {
-                        this.api.getBnplExplainability(id).subscribe({
-                            next: (expRes) => {
-                                this.explainabilityReasons = expRes.reasons || [];
-                                this.api.getBnplDepositRecommendation(id, true).subscribe({
-                                    next: (depositRes) => {
-                                        this.recommendedTopupToken = Number(depositRes.topup_token || 0);
-                                        this.loan = this.mapToLoanData(id, safetyRes, proofRes);
-                                        this.editedTitle = this.loan.title;
-                                        this.loading = false;
-                                    },
-                                    error: () => {
-                                        this.loan = this.mapToLoanData(id, safetyRes, proofRes);
-                                        this.editedTitle = this.loan.title;
-                                        this.loading = false;
-                                    },
-                                });
-                            },
-                            error: () => {
-                                this.loan = this.mapToLoanData(id, safetyRes, proofRes);
-                                this.editedTitle = this.loan.title;
-                                this.loading = false;
-                            },
-                        });
-                    },
-                    error: () => {
-                        this.loan = null;
-                        this.loading = false;
-                    },
-                });
-            },
-            error: () => {
-                this.loan = null;
-                this.loading = false;
-            },
-        });
+        forkJoin({
+            safety: this.api.getBnplSafetyMeter(id),
+            proof: this.api.getBnplProof(id),
+            explainability: this.api.getBnplExplainability(id).pipe(catchError(() => of({ reasons: [] }))),
+            deposit: this.api.getBnplDepositRecommendation(id, true).pipe(catchError(() => of(null))),
+            razorpay: this.api.getRazorpayStatus().pipe(catchError(() => of({ available: false, configured: false, enabled: false }))),
+        })
+            .pipe(finalize(() => { this.loading = false; }))
+            .subscribe({
+                next: ({ safety, proof, explainability, deposit, razorpay }) => {
+                    this.safetyColor = String(safety.safety_color || "");
+                    this.explainabilityReasons = Array.isArray(explainability.reasons) ? explainability.reasons : [];
+                    const depositRecord = (deposit as Record<string, any> | null) || null;
+                    this.recommendedTopupToken = Number((depositRecord ? depositRecord["topup_token"] : 0) || 0);
+                    this.razorpayAvailable = !!razorpay.available;
+                    this.loan = this.mapToLoanData(id, safety as Record<string, any>, proof as Record<string, any>);
+                    this.editedTitle = this.loan.title;
+                },
+                error: () => {
+                    this.loan = null;
+                    this.razorpayAvailable = false;
+                    this.explainabilityReasons = [];
+                    this.recommendedTopupToken = 0;
+                    this.safetyColor = "";
+                },
+            });
     }
 
     private mapToLoanData(id: string, safetyRes: Record<string, any>, proofRes: Record<string, any>): LoanData {
-        const proofLoan = proofRes?.['loan'];
-        const proofFinancial = proofRes?.['financial_summary'];
-        const proofCollateral = proofRes?.['collateral'];
-        const proofThresholds = proofRes?.['thresholds'];
-        const proofTimeline = proofRes?.['timeline'];
+        const proofLoan = proofRes["loan"] || {};
+        const proofFinancial = proofRes["financial_summary"] || {};
+        const proofCollateral = proofRes["collateral"] || {};
+        const proofThresholds = proofRes["thresholds"] || {};
+        const proofTimeline = proofRes["timeline"] || {};
 
-        const principalMinor = Number(
-            proofLoan?.['principal_minor']
-            ?? proofFinancial?.['principal_minor']
-            ?? 0
-        );
+        const currencyCode = String(proofLoan["currency"] || this.userCurrencyCode || "USD").toUpperCase();
+        const currencySymbol = this.currencySymbols.resolveSymbol(currencyCode, this.userCurrencyCode);
+
+        const principalMinor = Number(proofLoan["principal_minor"] ?? proofFinancial["principal_minor"] ?? 0);
         const outstandingMinor = Number(
-            safetyRes?.['outstanding_minor']
-            ?? proofFinancial?.['outstanding_minor']
-            ?? principalMinor
+            safetyRes["outstanding_minor"] ?? proofFinancial["outstanding_minor"] ?? principalMinor
         );
         const paidMinor = Math.max(0, principalMinor - outstandingMinor);
-        const collateralUnits = Number(
-            proofCollateral?.['deposited_units']
-            ?? proofCollateral?.['locked_token']
-            ?? 0
-        );
-        const collateralValueMinor = Number(safetyRes?.['collateral_value_minor'] ?? 0);
-        const currentPrice = collateralUnits > 0 ? (collateralValueMinor / 100) / collateralUnits : 0;
-        const liquidationPrice = Number(
-            proofLoan?.['liquidation_price']
-            ?? proofThresholds?.['liquidation_price']
-            ?? 0
-        );
 
-        const installmentsRaw = Array.isArray(proofRes?.['installments'])
-            ? proofRes['installments']
-            : Array.isArray(proofTimeline?.['installments'])
-                ? proofTimeline['installments']
+        const collateralUnits = Number(proofCollateral["deposited_units"] ?? proofCollateral["locked_token"] ?? 0);
+        const collateralValueMinor = Number(safetyRes["collateral_value_minor"] ?? 0);
+        const currentPrice = collateralUnits > 0 ? (collateralValueMinor / 100) / collateralUnits : 0;
+        const liquidationPrice = Number(proofLoan["liquidation_price"] ?? proofThresholds["liquidation_price"] ?? 0);
+
+        const installmentsRaw = Array.isArray(proofRes["installments"])
+            ? proofRes["installments"]
+            : Array.isArray(proofTimeline["installments"])
+                ? proofTimeline["installments"]
                 : [];
 
         const pastInstallments: Installment[] = installmentsRaw.map((installment: Record<string, any>, index: number) => {
-            const statusRaw = String(installment['status'] || "upcoming").toLowerCase();
-            const status: Installment["status"] = statusRaw.includes("paid")
-                ? "paid"
-                : statusRaw.includes("over") || statusRaw.includes("miss")
-                    ? "overdue"
-                    : "upcoming";
-            const amountMinor = Number(installment['amount_minor'] || installment['installment_amount_minor'] || 0);
+            const statusRaw = String(installment["status"] || "upcoming").toLowerCase();
+            const status: Installment["status"] =
+                statusRaw.includes("paid")
+                    ? "paid"
+                    : statusRaw.includes("over") || statusRaw.includes("miss")
+                        ? "overdue"
+                        : "upcoming";
+            const amountMinor = Number(installment["amount_minor"] || installment["installment_amount_minor"] || 0);
             return {
-                number: Number(installment['number'] || installment['installment_number'] || index + 1),
-                amount: `₹ ${(amountMinor / 100).toLocaleString("en-IN")}/-`,
-                date: this.formatDate(installment['due_at'] || installment['date'] || installment['due_date']),
+                number: Number(installment["number"] || installment["installment_number"] || index + 1),
+                amount: this.formatMinorAmount(amountMinor, currencySymbol),
+                date: this.formatDate(installment["due_at"] || installment["date"] || installment["due_date"]),
                 status,
             };
         });
 
         const paidInstallments = pastInstallments.filter((item) => item.status === "paid").length;
         const nextInstallment = pastInstallments.find((item) => item.status !== "paid");
-        const tenureDays = Number(proofLoan?.['tenure_days'] || 0);
-        const startDateRaw = String(proofLoan?.['created_at'] || proofTimeline?.['created_at'] || "");
+        const tenureDays = Number(proofLoan["tenure_days"] || 0);
+        const startDateRaw = String(proofLoan["created_at"] || proofTimeline["created_at"] || "");
         const endDate = startDateRaw && tenureDays > 0
             ? new Date(new Date(startDateRaw).getTime() + tenureDays * 24 * 60 * 60 * 1000)
             : null;
 
         return {
             id,
-            title: String(proofLoan?.['title'] || proofLoan?.['loan_name'] || `Loan ${id}`),
-            collateralAsset: String(proofCollateral?.['asset_symbol'] || "BNB"),
+            title: String(proofLoan["title"] || proofLoan["loan_name"] || `Loan ${id}`),
+            currencyCode,
+            currencySymbol,
+            collateralAsset: String(proofCollateral["asset_symbol"] || "BNB"),
             collateralAmount: Number(collateralUnits.toFixed(4)),
             entryPrice: Number(currentPrice.toFixed(2)),
             currentPrice: Number(currentPrice.toFixed(2)),
             liquidationPrice: Number(liquidationPrice.toFixed(2)),
-            totalAmount: `₹ ${(principalMinor / 100).toLocaleString("en-IN")}/-`,
-            paidAmount: `₹ ${(paidMinor / 100).toLocaleString("en-IN")}/-`,
-            remainingAmount: `₹ ${(outstandingMinor / 100).toLocaleString("en-IN")}/-`,
-            dueDate: endDate ? this.formatDate(endDate.toISOString()) : "—",
-            installmentAmount: `₹ ${(Number(proofLoan?.['installment_amount_minor'] || 0) / 100).toLocaleString("en-IN")}/-`,
-            totalInstallments: Number(proofLoan?.['installment_count'] ?? pastInstallments.length ?? 0),
+            totalAmount: this.formatMinorAmount(principalMinor, currencySymbol),
+            paidAmount: this.formatMinorAmount(paidMinor, currencySymbol),
+            remainingAmount: this.formatMinorAmount(outstandingMinor, currencySymbol),
+            dueDate: endDate ? this.formatDate(endDate.toISOString()) : "-",
+            installmentAmount: this.formatMinorAmount(Number(proofLoan["installment_amount_minor"] || 0), currencySymbol),
+            totalInstallments: Number(proofLoan["installment_count"] ?? pastInstallments.length ?? 0),
             paidInstallments,
-            nextInstallmentDate: nextInstallment ? nextInstallment.date : "—",
-            lastInstallmentDate: pastInstallments.length ? pastInstallments[pastInstallments.length - 1].date : "—",
+            nextInstallmentDate: nextInstallment ? nextInstallment.date : "-",
+            lastInstallmentDate: pastInstallments.length ? pastInstallments[pastInstallments.length - 1].date : "-",
             pastInstallments,
-            nextReminderDate: nextInstallment ? nextInstallment.date : "—",
-            notificationModes: Array.isArray(proofLoan?.['notification_channels']) ? proofLoan['notification_channels'] : [],
+            nextReminderDate: nextInstallment ? nextInstallment.date : "-",
+            notificationModes: Array.isArray(proofLoan["notification_channels"]) ? proofLoan["notification_channels"] : [],
         };
     }
 
+    private formatMinorAmount(amountMinor: number, symbol: string): string {
+        return `${symbol} ${(Number(amountMinor || 0) / 100).toLocaleString("en-IN")}/-`;
+    }
+
     private formatDate(input?: string): string {
-        if (!input) return "—";
+        if (!input) return "-";
         const d = new Date(input);
-        if (Number.isNaN(d.getTime())) return "—";
+        if (Number.isNaN(d.getTime())) return "-";
         return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
     }
 
@@ -250,13 +249,12 @@ export class LoanDetails implements OnInit {
         }
     }
 
-    // ── Razorpay SDK payment ───────────────────────────────────
     get pendingInstallment(): { number: number; amount: string; date: string } | null {
         if (!this.loan) return null;
-        const inst = this.loan.pastInstallments.find(
-            (i) => i.status === "overdue" || i.status === "upcoming"
+        const installment = this.loan.pastInstallments.find(
+            (item) => item.status === "overdue" || item.status === "upcoming"
         );
-        return inst ? { number: inst.number, amount: inst.amount, date: inst.date } : null;
+        return installment ? { number: installment.number, amount: installment.amount, date: installment.date } : null;
     }
 
     openRazorpay(): void {
@@ -264,54 +262,26 @@ export class LoanDetails implements OnInit {
         const pending = this.pendingInstallment;
         if (!pending) return;
 
-        // Parse the INR amount string "₹ 12,500/-" → 1250000 paise
-        const rawVal = parseFloat(pending.amount.replace(/[₹,\s/\-]/g, ""));
-        const amountPaise = ApiService.toPaise(rawVal);
+        const amountValue = parseFloat(pending.amount.replace(/[^0-9.]/g, ""));
+        if (!Number.isFinite(amountValue) || amountValue <= 0) return;
 
+        const amountPaise = ApiService.toPaise(amountValue);
         this.isPayingInstallment = true;
 
-        // Step 1: create autopay mandate via backend → get payment metadata
         this.api
             .createAutopayMandate({
                 user_id: sessionStorage.getItem("user_id") || "user_001",
-                loan_id: this.loan!.id,
+                loan_id: this.loan.id,
                 amount_minor: amountPaise,
-                currency: "INR",
+                currency: this.loan.currencyCode || this.userCurrencyCode || "USD",
             })
             .subscribe({
-                next: (_mandateRes) => {
-                    // Step 2: open Razorpay checkout SDK
-                    this.api.getRazorpayStatus().subscribe({
-                        next: (statusRes) => {
-                            if (!statusRes.available) {
-                                this.isPayingInstallment = false;
-                                this.razorpayAvailable = false;
-                                return;
-                            }
-                            this.api
-                                .openRazorpayCheckout(
-                                    amountPaise,
-                                    `Installment #${pending.number} — ${this.loan?.title}`,
-                                )
-                                .then((paymentRes) => {
-                                    this.isPayingInstallment = false;
-                                    this.markInstallmentPaid(paymentRes.razorpay_payment_id);
-                                })
-                                .catch(() => {
-                                    this.isPayingInstallment = false;
-                                });
-                        },
-                        error: () => {
-                            this.isPayingInstallment = false;
-                        },
-                    });
-                },
-                error: (_err) => {
-                    // Backend unavailable – open checkout directly with test key
+                next: () => {
                     this.api
                         .openRazorpayCheckout(
                             amountPaise,
-                            `Installment #${pending.number} — ${this.loan?.title}`,
+                            this.loan?.currencyCode || this.userCurrencyCode || "USD",
+                            `Installment #${pending.number} - ${this.loan?.title}`,
                         )
                         .then((paymentRes) => {
                             this.isPayingInstallment = false;
@@ -321,25 +291,32 @@ export class LoanDetails implements OnInit {
                             this.isPayingInstallment = false;
                         });
                 },
+                error: () => {
+                    this.isPayingInstallment = false;
+                },
             });
     }
 
     private markInstallmentPaid(paymentId: string): void {
         if (!this.loan) return;
-        const inst = this.loan.pastInstallments.find(
-            (i) => i.status === "overdue" || i.status === "upcoming"
+
+        const installment = this.loan.pastInstallments.find(
+            (item) => item.status === "overdue" || item.status === "upcoming"
         );
-        if (inst) {
-            inst.status = "paid";
-            this.loan.paidInstallments++;
-            const instAmt = parseFloat(inst.amount.replace(/[₹,\s/\-]/g, ""));
-            const remaining = parseFloat(this.loan.remainingAmount.replace(/[₹,\s/\-]/g, ""));
-            const paid = parseFloat(this.loan.paidAmount.replace(/[₹,\s/\-]/g, ""));
-            this.loan.remainingAmount = `₹ ${(remaining - instAmt).toLocaleString("en-IN")}/-`;
-            this.loan.paidAmount = `₹ ${(paid + instAmt).toLocaleString("en-IN")}/-`;
-            const next = this.loan.pastInstallments.find((i) => i.status === "upcoming");
-            this.loan.nextInstallmentDate = next ? next.date : "—";
-        }
+        if (!installment) return;
+
+        installment.status = "paid";
+        this.loan.paidInstallments += 1;
+
+        const installmentAmount = parseFloat(installment.amount.replace(/[^0-9.]/g, ""));
+        const remaining = parseFloat(this.loan.remainingAmount.replace(/[^0-9.]/g, ""));
+        const paid = parseFloat(this.loan.paidAmount.replace(/[^0-9.]/g, ""));
+        this.loan.remainingAmount = `${this.loan.currencySymbol} ${(remaining - installmentAmount).toLocaleString("en-IN")}/-`;
+        this.loan.paidAmount = `${this.loan.currencySymbol} ${(paid + installmentAmount).toLocaleString("en-IN")}/-`;
+
+        const next = this.loan.pastInstallments.find((item) => item.status === "upcoming");
+        this.loan.nextInstallmentDate = next ? next.date : "-";
+
         console.log(`Payment confirmed: ${paymentId}`);
     }
 }

@@ -34,7 +34,7 @@ export class GetStartedComponent {
   private readonly currencies: CurrencyOption[] = (currencyJson as { data: CurrencyOption[] }).data;
   readonly currencyOpen = signal(false);
   readonly currencyQuery = signal('');
-  readonly selectedCurrencyKey = signal('INR');
+  readonly selectedCurrencyKey = signal('USD');
   readonly selectedCurrencyDisplay = computed(() => {
     const key = this.selectedCurrencyKey();
     const selected = this.currencies.find((currency) => currency.key === key);
@@ -55,7 +55,7 @@ export class GetStartedComponent {
 
   readonly form = this.fb.group({
     wallet_address: this.fb.array([this.createWalletGroup()]),
-    currency: this.fb.control('INR', { nonNullable: true, validators: [Validators.required] }),
+    currency: this.fb.control('USD', { nonNullable: true, validators: [Validators.required] }),
     mobile_number: this.fb.control('', {
       validators: [Validators.pattern(/^\+?[0-9]{8,15}$/)]
     }),

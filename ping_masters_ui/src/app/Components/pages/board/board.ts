@@ -5,6 +5,7 @@ import { AuthService } from "../../../auth/auth.service";
 import { Router } from "@angular/router";
 import { SharedModule } from "../../../app.module";
 import { ApiService } from "../../../services/api.service";
+import { CurrencySymbolService } from "../../../services/currency-symbol.service";
 import type { User } from "firebase/auth";
 import { distinctUntilChanged } from "rxjs/operators";
 
@@ -14,16 +15,17 @@ type WalletAddress = { name: string; wallet_id: string };
     selector: "app-board",
     templateUrl: "./board.html",
     imports: [SharedModule],
-    styleUrls: ["./board.scss"]
+    styleUrls: ["./board.scss"],
 })
 export class Board implements OnInit {
     private readonly destroyRef = inject(DestroyRef);
 
     readonly user = signal<User | null>(null);
     readonly loading = signal(false);
-
     readonly historyItems = signal<Array<{ id: string; title: string; amount: string; status: string }>>([]);
     readonly wallets = signal<WalletAddress[]>([]);
+    readonly userCurrencyCode = signal("USD");
+    readonly userCurrencySymbol = signal("$");
 
     readonly walletEditorOpen = signal(false);
     readonly walletNameInput = signal("");
@@ -31,14 +33,16 @@ export class Board implements OnInit {
     readonly walletSaving = signal(false);
     readonly walletDirty = signal(false);
     readonly walletError = signal<string | null>(null);
-    
+
     readonly working = signal(false);
     readonly error = signal<string | null>(null);
+
     constructor(
         private eventBus: EventBusService,
         private authService: AuthService,
         private router: Router,
         private api: ApiService,
+        private currencySymbols: CurrencySymbolService,
     ) {
         this.eventBus
             .on("board")
@@ -72,6 +76,7 @@ export class Board implements OnInit {
 
     private loadBoardData(userId: string): void {
         this.loading.set(true);
+        this.userCurrencySymbol.set(this.currencySymbols.resolveSymbol(this.userCurrencyCode()));
 
         this.api.getUserWallets(userId).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
             next: (res) => {
@@ -94,23 +99,41 @@ export class Board implements OnInit {
             },
         });
 
+        this.api.getUser(userId).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+            next: (profile) => {
+                const code = String(profile?.currency_code || this.userCurrencyCode() || "USD").toUpperCase();
+                this.userCurrencyCode.set(code);
+                this.userCurrencySymbol.set(this.currencySymbols.resolveSymbol(code));
+                this.loadHistory();
+            },
+            error: () => {
+                this.userCurrencyCode.set("USD");
+                this.userCurrencySymbol.set(this.currencySymbols.resolveSymbol("USD"));
+                this.loadHistory();
+            },
+        });
+    }
+
+    private loadHistory(): void {
         this.api.getBnplAuditEvents(12).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
             next: (res) => {
                 const events = res.events || [];
                 const mapped = events.map((event: Record<string, any>, index: number) => {
-                    const loanId = String(event['loan_id'] || event['loanId'] || `loan-${index + 1}`);
-                    const amountMinor = Number(event['amount_minor'] || event['amountMinor'] || 0);
-                    const statusRaw = String(event['status'] || event['event_type'] || "pending").toLowerCase();
+                    const loanId = String(event["loan_id"] || event["loanId"] || `loan-${index + 1}`);
+                    const amountMinor = Number(event["amount_minor"] || event["amountMinor"] || 0);
+                    const statusRaw = String(event["status"] || event["event_type"] || "pending").toLowerCase();
                     const status = statusRaw.includes("fail")
                         ? "Failed"
                         : statusRaw.includes("paid") || statusRaw.includes("success") || statusRaw.includes("complete")
                             ? "Completed"
                             : "Pending";
+                    const currencyCode = String(event["currency"] || this.userCurrencyCode() || "USD").toUpperCase();
+                    const symbol = this.currencySymbols.resolveSymbol(currencyCode, this.userCurrencyCode());
 
                     return {
                         id: loanId,
-                        title: String(event['title'] || event['event_name'] || `Loan ${loanId}`),
-                        amount: amountMinor > 0 ? `₹ ${(amountMinor / 100).toLocaleString("en-IN")}/-` : "₹ 0/-",
+                        title: String(event["title"] || event["event_name"] || `Loan ${loanId}`),
+                        amount: amountMinor > 0 ? `${symbol} ${(amountMinor / 100).toLocaleString("en-IN")}/-` : `${symbol} 0/-`,
                         status,
                     };
                 });
@@ -203,42 +226,41 @@ export class Board implements OnInit {
         await this.run(() => this.authService.logout());
     }
 
-  private async run(action: () => Promise<void>): Promise<void> {
-    if (this.working()) return;
+    private async run(action: () => Promise<void>): Promise<void> {
+        if (this.working()) return;
 
-    this.error.set(null);
-    this.working.set(true);
+        this.error.set(null);
+        this.working.set(true);
 
-    try {
-      await action();
-    } catch (error: unknown) {
-      this.error.set(this.humanizeError(error));
-    } finally {
-      this.working.set(false);
+        try {
+            await action();
+        } catch (error: unknown) {
+            this.error.set(this.humanizeError(error));
+        } finally {
+            this.working.set(false);
+        }
     }
-  }
 
     private humanizeError(error: unknown): string {
-    const code = this.getFirebaseErrorCode(error);
-    switch (code) {
-      case 'auth/popup-blocked':
-        return 'Popup blocked. Allow popups for this site and try again.';
-      case 'auth/popup-closed-by-user':
-        return 'Sign-in was cancelled.';
-      case 'auth/operation-not-allowed':
-        return 'Google sign-in is not enabled for this Firebase project.';
-      case 'auth/unauthorized-domain':
-        return 'This domain is not authorized for Firebase Auth.';
-      default:
-        if (error instanceof Error && error.message) return error.message;
-        return 'Something went wrong. Please try again.';
+        const code = this.getFirebaseErrorCode(error);
+        switch (code) {
+            case "auth/popup-blocked":
+                return "Popup blocked. Allow popups for this site and try again.";
+            case "auth/popup-closed-by-user":
+                return "Sign-in was cancelled.";
+            case "auth/operation-not-allowed":
+                return "Google sign-in is not enabled for this Firebase project.";
+            case "auth/unauthorized-domain":
+                return "This domain is not authorized for Firebase Auth.";
+            default:
+                if (error instanceof Error && error.message) return error.message;
+                return "Something went wrong. Please try again.";
+        }
     }
-  }
 
     private getFirebaseErrorCode(error: unknown): string | null {
-    if (!error || typeof error !== 'object') return null;
-    const code = (error as { code?: unknown }).code;
-    return typeof code === 'string' ? code : null;
-  }
-
+        if (!error || typeof error !== "object") return null;
+        const code = (error as { code?: unknown }).code;
+        return typeof code === "string" ? code : null;
+    }
 }

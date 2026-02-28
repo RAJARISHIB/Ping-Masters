@@ -1,6 +1,4 @@
 <div class="borrow-page">
-
-    <!-- Header -->
     <header class="borrow-header flex items-center justify-between px-8 py-3">
         <div class="flex items-center gap-4">
             <button class="w-9 h-9 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors"
@@ -12,19 +10,12 @@
         <app-navbar></app-navbar>
     </header>
 
-    <!-- Main -->
     <main class="borrow-main px-8 py-6 flex gap-6">
-
-        <!-- Left — Form -->
         <div class="flex flex-col gap-5 flex-1 min-w-0">
-
-            <!-- Wallet Connect -->
             <div class="borrow-card p-5 flex flex-col gap-3">
                 <div class="flex items-center justify-between gap-3">
                     <span class="field-label">MetaMask Wallet</span>
-                    <button class="connect-wallet-btn"
-                        [disabled]="isConnectingWallet"
-                        (click)="connectMetaMask()">
+                    <button class="connect-wallet-btn" [disabled]="isConnectingWallet" (click)="connectMetaMask()">
                         <i class="fa-brands fa-ethereum mr-2"></i>
                         {{ connectedWallet ? 'Connected' : (isConnectingWallet ? 'Connecting...' : 'Connect Wallet') }}
                     </button>
@@ -36,7 +27,6 @@
                 <div *ngIf="walletValidationError" class="text-xs text-red-500">{{ walletValidationError }}</div>
             </div>
 
-            <!-- Loan Name -->
             <div class="borrow-card p-5 flex flex-col gap-3">
                 <span class="field-label">Loan Name</span>
                 <input
@@ -47,18 +37,23 @@
                     maxlength="60" />
             </div>
 
-            <!-- Amount -->
             <div class="borrow-card p-5 flex flex-col gap-3">
                 <div class="flex items-center justify-between">
                     <span class="field-label">Amount to Borrow</span>
-                    <span class="text-xs text-gray-400">Min ₹{{ minBorrow | number }} · Max ₹{{ maxBorrow | number }}</span>
+                    <span class="text-xs text-gray-400">
+                        Min {{ userCurrencySymbol }}{{ minBorrow | number }} ·
+                        Max {{ userCurrencySymbol }}{{ maxBorrow | number }}
+                    </span>
                 </div>
                 <div class="text-xs text-gray-500" *ngIf="eligibilityLoading">Loading eligibility...</div>
                 <div class="text-xs text-gray-500" *ngIf="!eligibilityLoading && eligibilityAvailableCredit > 0">
-                    Available Credit: ₹{{ eligibilityAvailableCredit | number:'1.0-0' }} · LTV: {{ (eligibilityLtvBps / 100) | number:'1.2-2' }}%
+                    Available Credit: {{ userCurrencySymbol }}{{ eligibilityAvailableCredit | number:'1.0-0' }} ·
+                    LTV: {{ (eligibilityLtvBps / 100) | number:'1.2-2' }}%
                 </div>
                 <div class="relative">
-                    <span class="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 font-medium text-sm">₹</span>
+                    <span class="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 font-medium text-sm">
+                        {{ userCurrencySymbol }}
+                    </span>
                     <input
                         class="field-input pl-8"
                         type="number"
@@ -68,13 +63,13 @@
                         (ngModelChange)="loadRiskScore()"
                         [(ngModel)]="form.amount" />
                 </div>
-                <div *ngIf="form.amount && form.amount < minBorrow"
-                    class="text-xs text-red-500">Minimum borrow amount is ₹{{ minBorrow | number }}</div>
-                <!-- Derived stats -->
+                <div *ngIf="form.amount && form.amount < minBorrow" class="text-xs text-red-500">
+                    Minimum borrow amount is {{ userCurrencySymbol }}{{ minBorrow | number }}
+                </div>
                 <div class="grid grid-cols-3 gap-3 pt-1" *ngIf="form.amount && form.amount >= minBorrow">
                     <div class="derived-cell">
                         <span class="derived-label">EMI / month</span>
-                        <span class="derived-value text-blue-600">₹{{ emiAmount | number }}</span>
+                        <span class="derived-value text-blue-600">{{ userCurrencySymbol }}{{ emiAmount | number }}</span>
                     </div>
                     <div class="derived-cell">
                         <span class="derived-label">BNB Collateral</span>
@@ -82,12 +77,11 @@
                     </div>
                     <div class="derived-cell">
                         <span class="derived-label">Liquidation at</span>
-                        <span class="derived-value text-red-500">${{ liquidationPrice }}</span>
+                        <span class="derived-value text-red-500">{{ userCurrencySymbol }}{{ liquidationPrice | number:'1.2-2' }}</span>
                     </div>
                 </div>
             </div>
 
-            <!-- Installments & Repayment -->
             <div class="borrow-card p-5 flex flex-col gap-4">
                 <span class="field-label">Repayment Plan</span>
                 <div class="flex gap-3 flex-wrap">
@@ -105,12 +99,11 @@
                     </div>
                     <div *ngIf="form.amount && form.amount >= minBorrow" class="flex flex-col gap-1 flex-1">
                         <span class="field-label-sm">Total Repayable</span>
-                        <div class="field-input-readonly">₹{{ (emiAmount * form.installments) | number }}</div>
+                        <div class="field-input-readonly">{{ userCurrencySymbol }}{{ (emiAmount * form.installments) | number }}</div>
                     </div>
                 </div>
             </div>
 
-            <!-- Notifications -->
             <div class="borrow-card p-5 flex flex-col gap-3">
                 <span class="field-label">Remind me via</span>
                 <div class="grid grid-cols-4 gap-2">
@@ -124,15 +117,10 @@
                 </div>
             </div>
 
-            <!-- spacer so last card isn't hidden behind fixed button -->
             <div class="h-8"></div>
-
         </div>
 
-        <!-- Right — Info Panel -->
         <div class="flex flex-col gap-5 w-80 shrink-0">
-
-            <!-- Credit Score -->
             <div class="borrow-card p-5 flex flex-col gap-3">
                 <div class="card-label-sm">Credit Score</div>
                 <div class="flex items-end gap-3">
@@ -150,7 +138,6 @@
                     </span>
                 </div>
                 <span *ngIf="creditScoreLoading" class="text-xs text-gray-400">Refreshing from risk API...</span>
-                <!-- Score bar -->
                 <div class="score-track">
                     <div class="score-fill" [style.width.%]="(creditScore / 850) * 100"></div>
                 </div>
@@ -159,13 +146,14 @@
                 </div>
             </div>
 
-            <!-- BNB Live Chart -->
             <div class="borrow-card overflow-hidden">
                 <div class="flex items-center justify-between px-5 pt-4 pb-2">
                     <div class="flex flex-col gap-0.5">
-                        <span class="card-label-sm">BNB / USD</span>
+                        <span class="card-label-sm">BNB / {{ userCurrencyCode }}</span>
                         <div class="flex items-baseline gap-2">
-                            <span class="text-2xl font-bold text-gray-900">${{ bnbPrice }}</span>
+                            <span class="text-2xl font-bold text-gray-900">
+                                {{ userCurrencySymbol }}{{ bnbPrice | number:'1.2-2' }}
+                            </span>
                             <span class="text-xs font-semibold px-2 py-0.5 rounded-full"
                                 [class.text-green-600]="bnbChange >= 0"
                                 [class.bg-green-50]="bnbChange >= 0"
@@ -176,27 +164,23 @@
                         </div>
                     </div>
                     <div class="flex flex-col items-end gap-0.5 text-xs text-gray-400">
-                        <span>H: ${{ bnbHigh }}</span>
-                        <span>L: ${{ bnbLow }}</span>
+                        <span>H: {{ userCurrencySymbol }}{{ bnbHigh | number:'1.2-2' }}</span>
+                        <span>L: {{ userCurrencySymbol }}{{ bnbLow | number:'1.2-2' }}</span>
                     </div>
                 </div>
 
-                <!-- SVG Chart -->
                 <svg [attr.viewBox]="'0 0 ' + chartW + ' ' + chartH"
                     class="chart-svg w-full"
                     preserveAspectRatio="none">
-                    <!-- Liquidation line if amount set -->
                     <line *ngIf="form.amount && form.amount >= minBorrow"
                         x1="0" [attr.y1]="chartH - ((liquidationPrice - chartMin) / (chartMax - chartMin || 1)) * chartH"
                         [attr.x2]="chartW" [attr.y2]="chartH - ((liquidationPrice - chartMin) / (chartMax - chartMin || 1)) * chartH"
                         stroke="#ea4335" stroke-width="1" stroke-dasharray="4 3" opacity="0.7" />
-                    <!-- Price path -->
                     <path [attr.d]="svgPath"
                         fill="none"
                         [attr.stroke]="bnbChange >= 0 ? '#1a73e8' : '#ea4335'"
                         stroke-width="1.8"
                         stroke-linejoin="round" />
-                    <!-- Area fill -->
                     <path [attr.d]="svgPath + ' L ' + chartW + ' ' + chartH + ' L 0 ' + chartH + ' Z'"
                         [attr.fill]="bnbChange >= 0 ? 'url(#grad-up)' : 'url(#grad-down)'"
                         opacity="0.15" />
@@ -211,30 +195,22 @@
                         </linearGradient>
                     </defs>
                 </svg>
-                <!-- Liq label -->
-                <div *ngIf="form.amount && form.amount >= minBorrow"
-                    class="flex items-center gap-1 px-5 pb-3 pt-1">
+
+                <div *ngIf="form.amount && form.amount >= minBorrow" class="flex items-center gap-1 px-5 pb-3 pt-1">
                     <span class="text-xs text-red-400 font-medium">
                         <i class="fa-solid fa-triangle-exclamation mr-1"></i>
-                        Liquidation threshold: ${{ liquidationPrice }}
+                        Liquidation threshold: {{ userCurrencySymbol }}{{ liquidationPrice | number:'1.2-2' }}
                     </span>
                 </div>
             </div>
-
         </div>
-
     </main>
 
-    <!-- Fixed bottom-right Next button -->
     <div class="next-fab">
         <span *ngIf="!isValid" class="next-hint">Connect wallet and fill all fields to continue</span>
-        <button class="next-btn"
-            [class.next-btn-disabled]="!isValid"
-            [disabled]="!isValid"
-            (click)="submit()">
+        <button class="next-btn" [class.next-btn-disabled]="!isValid" [disabled]="!isValid" (click)="submit()">
             Next
             <i class="fa-solid fa-arrow-right ml-2"></i>
         </button>
     </div>
-
 </div>
