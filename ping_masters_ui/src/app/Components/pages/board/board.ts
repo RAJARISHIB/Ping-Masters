@@ -1,9 +1,12 @@
-import { OnInit, Component } from "@angular/core";
+import { Component, DestroyRef, OnInit, inject, signal } from "@angular/core";
+import { takeUntilDestroyed } from "@angular/core/rxjs-interop";
 import { EventBusService } from "../../../services/communication.service";
 import { AuthService } from "../../../auth/auth.service";
 import { Router } from "@angular/router";
 import { SharedModule } from "../../../app.module";
 import { ApiService } from "../../../services/api.service";
+import type { User } from "firebase/auth";
+import { distinctUntilChanged } from "rxjs/operators";
 
 @Component({
     selector: "app-board",
@@ -12,58 +15,72 @@ import { ApiService } from "../../../services/api.service";
     styleUrls: ["./board.scss"]
 })
 export class Board implements OnInit {
-    user: any = null;
-    loading = false;
+    private readonly destroyRef = inject(DestroyRef);
 
-    historyItems: Array<{ id: string; title: string; amount: string; status: string }> = [];
+    readonly user = signal<User | null>(null);
+    readonly loading = signal(false);
 
-    wallets: string[] = [];
-
+    readonly historyItems = signal<Array<{ id: string; title: string; amount: string; status: string }>>([]);
+    readonly wallets = signal<string[]>([]);
+    
+    readonly working = signal(false);
+    readonly error = signal<string | null>(null);
     constructor(
         private eventBus: EventBusService,
         private authService: AuthService,
         private router: Router,
         private api: ApiService,
     ) {
-        this.eventBus.on("board").subscribe((data) => {
-            console.log("Received data on board>>", data);
-        });
+        this.eventBus
+            .on("board")
+            .pipe(takeUntilDestroyed(this.destroyRef))
+            .subscribe((data) => {
+                console.log("Received data on board>>", data);
+            });
     }
 
     ngOnInit(): void {
-        this.authService.user$.subscribe((user) => {
-            if (!user) {
-                this.router.navigate(["/login"]);
-                return;
-            }
-            this.user = user;
-            sessionStorage.setItem("user_id", user.uid);
-            this.loadBoardData(user.uid);
-        });
+        this.authService.user$
+            .pipe(
+                distinctUntilChanged((a, b) => a?.uid === b?.uid),
+                takeUntilDestroyed(this.destroyRef),
+            )
+            .subscribe((user) => {
+                this.user.set(user);
+
+                if (!user) {
+                    this.loading.set(false);
+                    this.historyItems.set([]);
+                    this.wallets.set([]);
+                    void this.router.navigate(["/login"]);
+                    return;
+                }
+
+                sessionStorage.setItem("user_id", user.uid);
+                this.loadBoardData(user.uid);
+            });
     }
 
     private loadBoardData(userId: string): void {
-        this.loading = true;
+        this.loading.set(true);
 
-        this.api.getUserWallets(userId).subscribe({
+        this.api.getUserWallets(userId).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
             next: (res) => {
                 const ids = (res.wallet_address || []).map((entry) => entry.wallet_id).filter(Boolean);
-                this.wallets = ids;
-                if (!this.wallets.length) {
-                    const connectedWallet = sessionStorage.getItem("connected_wallet");
-                    this.wallets = connectedWallet ? [connectedWallet] : [];
-                }
+                const connectedWallet = sessionStorage.getItem("connected_wallet");
+                const resolved = ids.length ? ids : (connectedWallet ? [connectedWallet] : []);
+                this.wallets.set(resolved);
             },
             error: () => {
                 const connectedWallet = sessionStorage.getItem("connected_wallet");
-                this.wallets = connectedWallet ? [connectedWallet] : [];
+                this.wallets.set(connectedWallet ? [connectedWallet] : []);
             },
         });
 
-        this.api.getBnplAuditEvents(12).subscribe({
+        this.api.getBnplAuditEvents(12).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
             next: (res) => {
                 const events = res.events || [];
-                this.historyItems = events.map((event: Record<string, any>, index: number) => {
+                const mapped = events.map((event: Record<string, any>, index: number) => {
                     const loanId = String(event['loan_id'] || event['loanId'] || `loan-${index + 1}`);
                     const amountMinor = Number(event['amount_minor'] || event['amountMinor'] || 0);
                     const statusRaw = String(event['status'] || event['event_type'] || "pending").toLowerCase();
@@ -80,11 +97,12 @@ export class Board implements OnInit {
                         status,
                     };
                 });
-                this.loading = false;
+                this.historyItems.set(mapped);
+                this.loading.set(false);
             },
             error: () => {
-                this.historyItems = [];
-                this.loading = false;
+                this.historyItems.set([]);
+                this.loading.set(false);
             },
         });
     }
@@ -96,4 +114,47 @@ export class Board implements OnInit {
     navigateToBorrow(): void {
         this.router.navigate(["/borrow"]);
     }
+
+    async signOut(): Promise<void> {
+        await this.run(() => this.authService.logout());
+    }
+
+  private async run(action: () => Promise<void>): Promise<void> {
+    if (this.working()) return;
+
+    this.error.set(null);
+    this.working.set(true);
+
+    try {
+      await action();
+    } catch (error: unknown) {
+      this.error.set(this.humanizeError(error));
+    } finally {
+      this.working.set(false);
+    }
+  }
+
+    private humanizeError(error: unknown): string {
+    const code = this.getFirebaseErrorCode(error);
+    switch (code) {
+      case 'auth/popup-blocked':
+        return 'Popup blocked. Allow popups for this site and try again.';
+      case 'auth/popup-closed-by-user':
+        return 'Sign-in was cancelled.';
+      case 'auth/operation-not-allowed':
+        return 'Google sign-in is not enabled for this Firebase project.';
+      case 'auth/unauthorized-domain':
+        return 'This domain is not authorized for Firebase Auth.';
+      default:
+        if (error instanceof Error && error.message) return error.message;
+        return 'Something went wrong. Please try again.';
+    }
+  }
+
+    private getFirebaseErrorCode(error: unknown): string | null {
+    if (!error || typeof error !== 'object') return null;
+    const code = (error as { code?: unknown }).code;
+    return typeof code === 'string' ? code : null;
+  }
+
 }

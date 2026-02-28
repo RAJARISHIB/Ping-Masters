@@ -1,5 +1,5 @@
 import { AsyncPipe } from '@angular/common';
-import { ChangeDetectionStrategy, Component, inject, signal, OnInit } from '@angular/core';
+import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { Router } from '@angular/router';
 import type { User } from 'firebase/auth';
@@ -30,19 +30,18 @@ export class LoginComponent {
         map((user) => user.uid),
         distinctUntilChanged(),
         switchMap((uid) => this.authService.needsGetStarted(uid)),
-        filter((needsGetStarted) => needsGetStarted),
         takeUntilDestroyed()
       )
-      .subscribe(() => {
-        this.router.navigateByUrl('/get-started');
-      });
-  }
+      .subscribe((needsGetStarted) => {
+        if (needsGetStarted) {
+          void this.router.navigateByUrl('/get-started');
+          return;
+        }
 
-  ngOnInit(): void {
-        this.user$.subscribe((user)=>{
-          console.log("User>>", user)
+        void this.router.navigateByUrl('/board').then(() => {
+          this._eventbus.emit({ key: 'board', data: { message: 'Hello from LoginComponent' } });
         });
-        this._eventbus.emit({key: "board",data: {message: "Hello from LoginComponent"}});
+      });
   }
 
   async signInWithGoogle(): Promise<void> {

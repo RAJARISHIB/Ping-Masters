@@ -168,7 +168,7 @@ export class GetStartedComponent {
         notification_channels: notificationChannels
       });
 
-      await this.router.navigateByUrl('/login');
+      await this.router.navigateByUrl('/board');
     } catch (error: unknown) {
       this.error.set(this.humanizeError(error));
     } finally {
@@ -184,7 +184,7 @@ export class GetStartedComponent {
 
     const needsGetStarted = await this.authService.needsGetStarted(user.uid);
     if (!needsGetStarted) {
-      await this.router.navigateByUrl('/login');
+      await this.router.navigateByUrl('/board');
     }
   }
 
