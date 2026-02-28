@@ -2,7 +2,7 @@
   <section class="login-card" role="main" aria-labelledby="login-title">
     <header class="brand">
       <div class="brand-mark" aria-hidden="true">PM</div>
-      <div class="brand-name">Ping Masters</div>
+      <div class="brand-name">Velox</div>
     </header>
 
     @if (user$ | async; as user) {
@@ -36,7 +36,7 @@
       </button>
     } @else {
       <h1 id="login-title" class="title">Sign in</h1>
-      <p class="subtitle">Use your Google Account to continue to Ping Masters.</p>
+      <p class="subtitle">Use your Google Account to continue to Velox.</p>
 
       <button class="btn btn-google" type="button" (click)="signInWithGoogle()" [disabled]="working()">
         <span class="google-icon" aria-hidden="true">
