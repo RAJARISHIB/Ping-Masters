@@ -69,6 +69,26 @@ export class AuthService {
     );
   }
 
+  async saveWalletAddresses(uid: string, wallets: Array<{ name: string; wallet_id: string }>): Promise<void> {
+    const normalized = new Map<string, { name: string; wallet_id: string }>();
+    for (const wallet of wallets) {
+      const name = String(wallet?.name ?? '').trim() || 'Wallet';
+      const walletId = String(wallet?.wallet_id ?? '').trim();
+      if (!walletId) continue;
+      normalized.set(walletId.toLowerCase(), { name, wallet_id: walletId });
+    }
+
+    const wallet_address = Array.from(normalized.values());
+
+    const userRef = doc(this.firestore, 'user', uid);
+    const testUsersRef = doc(this.firestore, 'test_users', uid);
+
+    await Promise.all([
+      setDoc(userRef, { wallet_address }, { merge: true }),
+      setDoc(testUsersRef, { user_id: uid, wallet_address }, { merge: true })
+    ]);
+  }
+
   private async ensureUserDocument(user: User, info: AdditionalUserInfo | null): Promise<void> {
     const userRef = doc(this.firestore, 'user', user.uid);
     const snapshot = await getDoc(userRef);

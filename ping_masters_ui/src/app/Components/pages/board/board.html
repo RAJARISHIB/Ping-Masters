@@ -75,17 +75,56 @@
             <div class="board-card bg-white rounded-2xl overflow-hidden">
                 <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
                     <span class="text-xs font-semibold text-gray-500 uppercase tracking-widest">Wallets</span>
-                    <button class="text-xs text-blue-600 hover:text-blue-800 transition-colors duration-150 font-semibold">
-                        + Add
+                    <button
+                        class="text-xs text-blue-600 hover:text-blue-800 transition-colors duration-150 font-semibold"
+                        type="button"
+                        (click)="toggleWalletEditor()">
+                        {{ walletEditorOpen() ? 'Close' : '+ Add' }}
                     </button>
                 </div>
                 <div *ngIf="loading()" class="px-6 py-4 text-xs text-gray-400">Loading wallets...</div>
                 <div *ngIf="!loading() && wallets().length === 0" class="px-6 py-4 text-xs text-gray-400">No wallets found for this user.</div>
                 <div class="flex flex-col gap-1 p-3">
-                    @for (wallet of wallets(); track wallet) {
-                        <app-wallet-item [address]="wallet"></app-wallet-item>
+                    @for (wallet of wallets(); track wallet.wallet_id) {
+                        <app-wallet-item [wallet]="wallet" (deleteWallet)="removeWallet(wallet.wallet_id)"></app-wallet-item>
                     }
                 </div>
+
+                @if (walletError(); as message) {
+                    <div class="px-6 pb-4 text-xs text-red-600">{{ message }}</div>
+                }
+
+                @if (walletEditorOpen()) {
+                    <div class="px-6 pb-4 flex flex-col gap-2">
+                        <input
+                            class="w-full rounded-xl border border-gray-200 px-4 py-2 text-sm outline-none focus:border-blue-400"
+                            type="text"
+                            placeholder="Wallet name (e.g. Metamask)"
+                            [value]="walletNameInput()"
+                            (input)="walletNameInput.set($any($event.target).value)" />
+                        <input
+                            class="w-full rounded-xl border border-gray-200 px-4 py-2 text-sm outline-none focus:border-blue-400"
+                            type="text"
+                            placeholder="Wallet address (e.g. 0xabc123...)"
+                            [value]="walletIdInput()"
+                            (input)="walletIdInput.set($any($event.target).value)" />
+                    </div>
+                }
+
+                @if (walletEditorOpen() || walletDirty()) {
+                    <div class="px-6 py-4 border-t border-gray-100 flex items-center justify-between">
+                        <span class="text-xs text-gray-400">
+                            @if (walletDirty()) { Unsaved changes }
+                        </span>
+                        <button
+                            class="text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 transition-colors duration-150 px-4 py-2 rounded-full disabled:opacity-50 disabled:cursor-not-allowed"
+                            type="button"
+                            [disabled]="walletSaving() || (!walletDirty() && !walletNameInput().trim() && !walletIdInput().trim())"
+                            (click)="submitWalletChanges()">
+                            {{ walletSaving() ? 'Saving...' : 'Submit' }}
+                        </button>
+                    </div>
+                }
             </div>
 
         </div>

@@ -8,6 +8,8 @@ import { ApiService } from "../../../services/api.service";
 import type { User } from "firebase/auth";
 import { distinctUntilChanged } from "rxjs/operators";
 
+type WalletAddress = { name: string; wallet_id: string };
+
 @Component({
     selector: "app-board",
     templateUrl: "./board.html",
@@ -21,7 +23,14 @@ export class Board implements OnInit {
     readonly loading = signal(false);
 
     readonly historyItems = signal<Array<{ id: string; title: string; amount: string; status: string }>>([]);
-    readonly wallets = signal<string[]>([]);
+    readonly wallets = signal<WalletAddress[]>([]);
+
+    readonly walletEditorOpen = signal(false);
+    readonly walletNameInput = signal("");
+    readonly walletIdInput = signal("");
+    readonly walletSaving = signal(false);
+    readonly walletDirty = signal(false);
+    readonly walletError = signal<string | null>(null);
     
     readonly working = signal(false);
     readonly error = signal<string | null>(null);
@@ -66,14 +75,22 @@ export class Board implements OnInit {
 
         this.api.getUserWallets(userId).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
             next: (res) => {
-                const ids = (res.wallet_address || []).map((entry) => entry.wallet_id).filter(Boolean);
+                const apiWallets = (res.wallet_address || []) as WalletAddress[];
+                const wallets = apiWallets
+                    .map((entry) => ({
+                        name: String(entry?.name ?? "").trim() || "Wallet",
+                        wallet_id: String(entry?.wallet_id ?? "").trim(),
+                    }))
+                    .filter((entry) => entry.wallet_id);
                 const connectedWallet = sessionStorage.getItem("connected_wallet");
-                const resolved = ids.length ? ids : (connectedWallet ? [connectedWallet] : []);
-                this.wallets.set(resolved);
+                const fallback = connectedWallet ? [{ name: "Connected wallet", wallet_id: connectedWallet }] : [];
+                this.wallets.set(wallets.length ? wallets : fallback);
+                this.walletDirty.set(false);
             },
             error: () => {
                 const connectedWallet = sessionStorage.getItem("connected_wallet");
-                this.wallets.set(connectedWallet ? [connectedWallet] : []);
+                this.wallets.set(connectedWallet ? [{ name: "Connected wallet", wallet_id: connectedWallet }] : []);
+                this.walletDirty.set(false);
             },
         });
 
@@ -113,6 +130,73 @@ export class Board implements OnInit {
 
     navigateToBorrow(): void {
         this.router.navigate(["/borrow"]);
+    }
+
+    toggleWalletEditor(): void {
+        this.walletError.set(null);
+        const nextOpen = !this.walletEditorOpen();
+        this.walletEditorOpen.set(nextOpen);
+        if (!nextOpen) {
+            this.walletNameInput.set("");
+            this.walletIdInput.set("");
+        }
+    }
+
+    removeWallet(walletId: string): void {
+        this.walletError.set(null);
+        const before = this.wallets();
+        const next = before.filter((entry) => entry.wallet_id !== walletId);
+        if (next.length === before.length) return;
+        this.wallets.set(next);
+        this.walletDirty.set(true);
+    }
+
+    async submitWalletChanges(): Promise<void> {
+        if (this.walletSaving()) return;
+        this.walletError.set(null);
+
+        const currentUser = this.user();
+        if (!currentUser) {
+            void this.router.navigate(["/login"]);
+            return;
+        }
+
+        const name = this.walletNameInput().trim();
+        const walletId = this.walletIdInput().trim();
+
+        if (name || walletId) {
+            if (!name || !walletId) {
+                this.walletError.set("Wallet name and wallet address are required.");
+                return;
+            }
+
+            const exists = this.wallets().some((wallet) => wallet.wallet_id.toLowerCase() === walletId.toLowerCase());
+            if (exists) {
+                this.walletError.set("That wallet address is already added.");
+                return;
+            }
+
+            this.wallets.set([...this.wallets(), { name, wallet_id: walletId }]);
+            this.walletNameInput.set("");
+            this.walletIdInput.set("");
+            this.walletDirty.set(true);
+        }
+
+        if (!this.walletDirty()) {
+            this.walletEditorOpen.set(false);
+            return;
+        }
+
+        this.walletSaving.set(true);
+        try {
+            await this.authService.saveWalletAddresses(currentUser.uid, this.wallets());
+            this.walletDirty.set(false);
+            this.walletEditorOpen.set(false);
+        } catch (error: unknown) {
+            this.walletError.set(error instanceof Error ? error.message : "Failed to save wallets. Please try again.");
+        } finally {
+            this.walletSaving.set(false);
+        }
     }
 
     async signOut(): Promise<void> {
