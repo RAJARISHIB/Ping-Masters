@@ -132,6 +132,26 @@ export interface UserWalletDetailsResponse {
   wallet_count: number;
 }
 
+export interface UserProfileResponse {
+  user_id: string;
+  email?: string;
+  phone?: string;
+  full_name?: string;
+  currency_code?: string;
+  currency_symbol?: string;
+  [key: string]: any;
+}
+
+export interface CurrencyConvertResponse {
+  amount: number;
+  from_currency: string;
+  to_currency: string;
+  converted_amount: number;
+  rate: number;
+  provider?: string;
+  raw?: Record<string, any>;
+}
+
 export interface WalletBalanceResponse {
   wallet: string;
   chain: string;
@@ -261,14 +281,28 @@ export class ApiService {
     return this.http.get<UserWalletDetailsResponse>(`${this.base}/users/${userId}/wallets`);
   }
 
+  getUser(userId: string): Observable<UserProfileResponse> {
+    return this.http.get<UserProfileResponse>(`${this.base}/users/${userId}`);
+  }
+
   // ── Market ────────────────────────────────────────────────────────────────
 
-  getBnbChart(timeframe = '1D'): Observable<MarketChartResponse> {
+  getBnbChart(timeframe = '1D', vsCurrency = 'usd'): Observable<MarketChartResponse> {
     return this.http.post<MarketChartResponse>(`${this.base}/market/chart`, {
       symbol: 'bnb',
       timeframe,
-      vs_currency: 'usd',
+      vs_currency: vsCurrency,
     } as MarketChartRequest);
+  }
+
+  convertCurrency(amount: number, fromCurrency: string, toCurrency: string): Observable<CurrencyConvertResponse> {
+    return this.http.get<CurrencyConvertResponse>(`${this.base}/currency/convert`, {
+      params: {
+        amount,
+        from_currency: fromCurrency,
+        to_currency: toCurrency,
+      },
+    });
   }
 
   // ── Risk / ML ─────────────────────────────────────────────────────────────
@@ -369,6 +403,7 @@ export class ApiService {
    */
   async openRazorpayCheckout(
     amountMinor: number,
+    currency: string,
     description: string,
     prefill?: { name?: string; email?: string; contact?: string }
   ): Promise<RazorpaySuccessResponse> {
@@ -381,7 +416,7 @@ export class ApiService {
       const options: RazorpayOptions = {
         key: environment.razorpayKey,
         amount: amountMinor,
-        currency: 'INR',
+        currency: String(currency || "USD").toUpperCase(),
         name: 'Ping Masters',
         description,
         handler: (response) => resolve(response),
@@ -396,8 +431,8 @@ export class ApiService {
     });
   }
 
-  /** Convert INR to paise (× 100), rounded to integer */
-  static toPaise(inr: number): number {
-    return Math.round(inr * 100);
+  /** Convert major currency units to minor units (x100), rounded to integer. */
+  static toPaise(amountMajor: number): number {
+    return Math.round(amountMajor * 100);
   }
 }
