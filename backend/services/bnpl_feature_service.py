@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import hashlib
 import logging
+import re
 from threading import RLock
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from uuid import uuid4
@@ -58,6 +59,34 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _orderable_sort_key(value: Any) -> tuple:
+    """Return a safe sortable tuple for heterogeneous Firestore values."""
+    if value is None:
+        return (3, 0.0, "")
+    if isinstance(value, bool):
+        return (0, float(int(value)), "")
+    if isinstance(value, (int, float)):
+        return (0, float(value), "")
+    if isinstance(value, datetime):
+        return (0, value.timestamp(), "")
+    return (1, 0.0, str(value))
+
+
+def _normalize_contact_number(contact: Optional[str]) -> Optional[str]:
+    """Normalize and validate customer contact for payment provider constraints."""
+    if contact is None:
+        return None
+    raw_value = str(contact).strip()
+    if not raw_value:
+        return None
+    digits_only = re.sub(r"\D", "", raw_value)
+    if len(digits_only) < 10 or len(digits_only) > 15:
+        raise ValueError("customer_contact must contain 10 to 15 digits.")
+    if len(set(digits_only)) == 1:
+        raise ValueError("customer_contact cannot contain the same digit repeated.")
+    return digits_only
 
 
 class BnplFeatureService:
@@ -153,12 +182,33 @@ class BnplFeatureService:
         """Query documents by filters in active storage backend."""
         collection_name = self._collections[collection_alias]
         if self._firebase_manager is not None:
-            return self._firebase_manager.query_documents(
-                collection_name=collection_name,
-                filters=filters,
-                order_by=order_by,
-                limit=limit,
-            )
+            try:
+                return self._firebase_manager.query_documents(
+                    collection_name=collection_name,
+                    filters=filters,
+                    order_by=order_by,
+                    limit=limit,
+                )
+            except Exception as exc:
+                message = str(exc).lower()
+                if order_by and "requires an index" in message:
+                    logger.warning(
+                        "Firestore composite index missing. Falling back to in-memory sort "
+                        "collection=%s order_by=%s",
+                        collection_name,
+                        order_by,
+                    )
+                    rows = self._firebase_manager.query_documents(
+                        collection_name=collection_name,
+                        filters=filters,
+                        order_by=None,
+                        limit=None,
+                    )
+                    rows.sort(key=lambda item: _orderable_sort_key(item.get(order_by)))
+                    if limit is not None:
+                        return rows[: int(limit)]
+                    return rows
+                raise
         with self._lock:
             bucket = self._memory_store.setdefault(collection_name, {})
             records: List[Dict[str, Any]] = []
@@ -271,7 +321,7 @@ class BnplFeatureService:
         payloads = self._query_documents(
             "installments",
             filters=[("loan_id", "==", loan_id), ("is_deleted", "==", False)],
-            order_by="sequence_no",
+            order_by=None,
         )
         installments = [InstallmentModel.from_firestore(item, doc_id=item.get("id")) for item in payloads]
         installments.sort(key=lambda item: item.sequence_no)
@@ -541,7 +591,7 @@ class BnplFeatureService:
         loan_id: str,
         user_id: str,
         asset_symbol: str,
-        deposited_units: int,
+        deposited_units: float,
         collateral_value_minor: int,
         oracle_price_minor: int,
         vault_address: str,
@@ -566,7 +616,7 @@ class BnplFeatureService:
                 chain_id=chain_id,
                 deposit_tx_hash=deposit_tx_hash,
                 asset_symbol=asset_symbol.upper(),
-                deposited_units=int(deposited_units),
+                deposited_units=float(deposited_units),
                 collateral_value_minor=int(collateral_value_minor),
                 oracle_price_minor=int(oracle_price_minor),
                 health_factor=0.0,
@@ -596,7 +646,7 @@ class BnplFeatureService:
     def top_up_collateral(
         self,
         collateral_id: str,
-        added_units: int,
+        added_units: float,
         added_value_minor: int,
         oracle_price_minor: int,
         topup_tx_hash: Optional[str] = None,
@@ -610,7 +660,7 @@ class BnplFeatureService:
             if added_value_minor <= 0:
                 raise ValueError("added_value_minor must be > 0")
 
-            collateral.deposited_units += int(added_units)
+            collateral.deposited_units += float(added_units)
             collateral.collateral_value_minor += int(added_value_minor)
             collateral.oracle_price_minor = int(oracle_price_minor)
             collateral.status = CollateralStatus.TOPPED_UP
@@ -734,16 +784,19 @@ class BnplFeatureService:
                 raise ValueError("amount_minor must be > 0")
             if self._razorpay_service is None or not self._razorpay_service.is_configured:
                 raise ValueError("Razorpay is not configured.")
+            normalized_contact = _normalize_contact_number(customer_contact)
+            customer_payload: Dict[str, str] = {"name": customer_name or user_id}
+            customer_email_value = (customer_email or "{0}@example.com".format(user_id)).strip()
+            if customer_email_value:
+                customer_payload["email"] = customer_email_value
+            if normalized_contact:
+                customer_payload["contact"] = normalized_contact
 
             link = self._razorpay_service.create_payment_link(
                 amount_minor=int(amount_minor),
                 currency=currency,
                 description="Autopay mandate simulation for loan {0}".format(loan_id),
-                customer={
-                    "name": customer_name or user_id,
-                    "email": customer_email or "{0}@example.local".format(user_id),
-                    "contact": customer_contact or "9999999999",
-                },
+                customer=customer_payload,
                 notes={"loan_id": loan_id, "user_id": user_id, "flow": "autopay_mandate"},
             )
             self._record_event(
@@ -1433,14 +1486,40 @@ class BnplFeatureService:
         """Return Razorpay integration status for payment-dependent features."""
         try:
             if self._razorpay_service is None:
-                return {"enabled": False, "configured": False, "available": False}
+                return {
+                    "enabled": False,
+                    "configured": False,
+                    "available": False,
+                    "mode": "disabled",
+                    "is_test_mode": False,
+                    "key_id_masked": "",
+                    "checkout_key_id": "",
+                    "api_base_url": "",
+                }
             return {
                 "enabled": bool(self._razorpay_service.is_enabled),
                 "configured": bool(self._razorpay_service.is_configured),
                 "available": bool(self._razorpay_service.is_configured),
+                "mode": str(getattr(self._razorpay_service, "key_mode", "unknown")),
+                "is_test_mode": bool(getattr(self._razorpay_service, "is_test_mode", False)),
+                "key_id_masked": str(getattr(self._razorpay_service, "key_id_masked", "")),
+                "checkout_key_id": str(getattr(self._razorpay_service, "public_key_id", "")),
+                "api_base_url": str(getattr(self._razorpay_service, "api_base_url", "")),
             }
         except Exception:
             logger.exception("Failed getting Razorpay status.")
+            raise
+
+    def verify_razorpay_credentials(self) -> Dict[str, Any]:
+        """Perform live auth verification using configured Razorpay credentials."""
+        try:
+            if self._razorpay_service is None:
+                raise ValueError("Razorpay integration is not initialized.")
+            if not self._razorpay_service.is_configured:
+                raise ValueError("Razorpay is not configured.")
+            return self._razorpay_service.verify_credentials()
+        except Exception:
+            logger.exception("Failed verifying Razorpay credentials.")
             raise
 
     def get_audit_events(self, limit: int = 100) -> Dict[str, Any]:

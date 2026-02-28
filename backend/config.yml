@@ -62,8 +62,8 @@ market_api:
 
 razorpay:
   enabled: true
-  key_id: "rzp_test_REJ6UbWPqZ8yMn"
-  key_secret: "hS7wbtgUHpOV8eXJLoaWRN5"
+  key_id: "rzp_test_SLPzNBE5mkKD8K"
+  key_secret: "2eNvyc9Dx5uCRhc0TYagWe3i"
   api_base_url: "https://api.razorpay.com"
   timeout_sec: 15
 

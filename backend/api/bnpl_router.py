@@ -37,7 +37,7 @@ class BnplLockDepositRequest(BaseModel):
     loan_id: str = Field(..., min_length=3)
     user_id: str = Field(..., min_length=3)
     asset_symbol: str = Field(default="BNB", min_length=2)
-    deposited_units: int = Field(..., gt=0)
+    deposited_units: float = Field(..., gt=0)
     collateral_value_minor: int = Field(..., gt=0)
     oracle_price_minor: int = Field(..., gt=0)
     vault_address: str = Field(..., min_length=6)
@@ -50,7 +50,7 @@ class BnplTopUpRequest(BaseModel):
     """Request payload for top-up collateral action."""
 
     collateral_id: str = Field(..., min_length=3)
-    added_units: int = Field(..., gt=0)
+    added_units: float = Field(..., gt=0)
     added_value_minor: int = Field(..., gt=0)
     oracle_price_minor: int = Field(..., gt=0)
     topup_tx_hash: Optional[str] = Field(default=None)
@@ -144,6 +144,17 @@ def _require_role(role: Optional[str], allowed: set[str]) -> str:
             detail="Insufficient role. Required one of: {0}".format(", ".join(sorted(allowed))),
         )
     return normalized
+
+
+def _raise_provider_http_error(exc: RuntimeError, endpoint_name: str) -> None:
+    """Translate upstream provider runtime errors to API-safe HTTP exceptions."""
+    message = str(exc)
+    logger.exception("%s failed due to upstream provider error.", endpoint_name)
+    if "status=400" in message:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=message)
+    if "status=401" in message or "status=403" in message:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=message)
+    raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=message)
 
 
 def build_bnpl_router(service: BnplFeatureService) -> APIRouter:
@@ -255,6 +266,19 @@ def build_bnpl_router(service: BnplFeatureService) -> APIRouter:
             logger.exception("Razorpay status endpoint failed.")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
 
+    @router.get("/payments/razorpay/verify", summary="Verify Razorpay credentials from backend runtime")
+    def razorpay_verify() -> Dict[str, Any]:
+        """Call Razorpay read-only endpoint to verify backend-side credentials."""
+        try:
+            return service.verify_razorpay_credentials()
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        except RuntimeError as exc:
+            _raise_provider_http_error(exc, "Razorpay verify endpoint")
+        except Exception as exc:
+            logger.exception("Razorpay verify endpoint failed.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
     @router.get("/loans", summary="List loans for a user (from Firestore when Firebase enabled)")
     def list_loans(user_id: str = Query(..., min_length=3), limit: int = Query(default=50, ge=1, le=200)) -> Dict[str, Any]:
         """Return loans for the given user_id. Data is read from Firestore (bnpl_loans) when Firebase is enabled."""
@@ -352,6 +376,8 @@ def build_bnpl_router(service: BnplFeatureService) -> APIRouter:
             )
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        except RuntimeError as exc:
+            _raise_provider_http_error(exc, "Autopay mandate endpoint")
         except Exception as exc:
             logger.exception("Autopay mandate endpoint failed.")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
@@ -397,6 +423,8 @@ def build_bnpl_router(service: BnplFeatureService) -> APIRouter:
             )
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        except RuntimeError as exc:
+            _raise_provider_http_error(exc, "Dispute refund endpoint")
         except Exception as exc:
             logger.exception("Dispute refund endpoint failed.")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
@@ -494,6 +522,8 @@ def build_bnpl_router(service: BnplFeatureService) -> APIRouter:
         """Recommend extra deposit to keep position safe."""
         try:
             return service.recommend_dynamic_deposit(loan_id=loan_id, use_ml=use_ml)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
         except Exception as exc:
             logger.exception("Risk recommend deposit endpoint failed.")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
@@ -512,6 +542,8 @@ def build_bnpl_router(service: BnplFeatureService) -> APIRouter:
         """Return top reasons for decision outputs."""
         try:
             return service.explainability_panel(loan_id=loan_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
         except Exception as exc:
             logger.exception("Explainability endpoint failed.")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
@@ -521,6 +553,8 @@ def build_bnpl_router(service: BnplFeatureService) -> APIRouter:
         """Return transparent timeline + proof material."""
         try:
             return service.public_proof_page(loan_id=loan_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
         except Exception as exc:
             logger.exception("Proof endpoint failed.")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))

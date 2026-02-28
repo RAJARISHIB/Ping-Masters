@@ -30,6 +30,49 @@ export interface RiskFeatureInput {
   installment_amount: number;
 }
 
+export interface DepositRecommendationRequest {
+  plan_amount_inr: number;
+  tenure_days: number;
+  risk_tier: string;
+  collateral_token: string;
+  collateral_type: "stable" | "volatile";
+  locked_token: number;
+  price_inr: number;
+  stress_drop_pct?: number;
+  fees_buffer_pct?: number;
+  outstanding_debt_inr?: number;
+}
+
+export interface DefaultPredictionRequest {
+  user_id?: string;
+  plan_id?: string;
+  installment_id?: string;
+  cutoff_at?: string;
+  on_time_ratio: number;
+  missed_count_90d: number;
+  max_days_late_180d: number;
+  avg_days_late: number;
+  days_since_last_late: number;
+  consecutive_on_time_count: number;
+  plan_amount: number;
+  tenure_days: number;
+  installment_amount: number;
+  installment_number: number;
+  days_until_due: number;
+  current_safety_ratio: number;
+  distance_to_liquidation_threshold: number;
+  collateral_type: "stable" | "volatile";
+  collateral_volatility_bucket: "low" | "medium" | "high";
+  topup_count_30d: number;
+  topup_recency_days: number;
+  opened_app_last_7d: 0 | 1;
+  clicked_pay_now_last_7d: 0 | 1;
+  payment_attempt_failed_count: number;
+  wallet_age_days: number;
+  tx_count_30d: number;
+  stablecoin_balance_bucket: "low" | "medium" | "high";
+}
+
 export interface BnplCreatePlanRequest {
   user_id: string;
   merchant_id: string;
@@ -92,9 +135,22 @@ export interface RiskPredictResponse {
 export interface MlScoreResponse {
   risk_tier: string;
   probabilities: Record<string, number>;
-  top_reasons: string[];
+  top_reasons: Array<Record<string, any> | string>;
   model_name: string;
   model_version: string;
+}
+
+export interface DefaultPredictionResponse {
+  user_id?: string;
+  plan_id?: string;
+  installment_id?: string;
+  p_miss_next: number;
+  tier: string;
+  thresholds: Record<string, number>;
+  actions: string[];
+  top_reasons: string[];
+  model_name?: string;
+  model_version?: string;
 }
 
 export interface BnplPlanCreateResponse {
@@ -195,6 +251,12 @@ export interface BnplAuditEventsResponse {
   events: Array<Record<string, any>>;
 }
 
+export interface BnplLoanListResponse {
+  user_id: string;
+  total: number;
+  loans: Array<Record<string, any>>;
+}
+
 export interface BnplEmiPlanItem {
   plan_id: string;
   plan_name?: string;
@@ -226,6 +288,10 @@ export interface BnplRazorpayStatusResponse {
   enabled: boolean;
   configured: boolean;
   available: boolean;
+  mode?: string;
+  is_test_mode?: boolean;
+  key_id_masked?: string;
+  checkout_key_id?: string;
 }
 
 // ── Razorpay types ─────────────────────────────────────────────────────────────
@@ -241,6 +307,11 @@ export interface RazorpayOptions {
   prefill?: { name?: string; email?: string; contact?: string };
   theme?: { color?: string };
   modal?: { ondismiss?: () => void };
+}
+
+export interface RazorpayCheckoutConfig {
+  keyId?: string;
+  orderId?: string;
 }
 
 export interface RazorpaySuccessResponse {
@@ -315,6 +386,18 @@ export class ApiService {
     return this.http.post<MlScoreResponse>(`${this.base}/ml/score`, req);
   }
 
+  recommendDepositPolicy(req: DepositRecommendationRequest): Observable<DepositRecommendationResponse> {
+    return this.http.post<DepositRecommendationResponse>(`${this.base}/risk/recommend-deposit`, req);
+  }
+
+  recommendDepositMl(req: DepositRecommendationRequest): Observable<DepositRecommendationResponse> {
+    return this.http.post<DepositRecommendationResponse>(`${this.base}/ml/recommend-deposit`, req);
+  }
+
+  predictDefault(req: DefaultPredictionRequest): Observable<DefaultPredictionResponse> {
+    return this.http.post<DefaultPredictionResponse>(`${this.base}/ml/predict-default`, req);
+  }
+
   // ── BNPL ──────────────────────────────────────────────────────────────────
 
   createBnplPlan(req: BnplCreatePlanRequest): Observable<BnplPlanCreateResponse> {
@@ -354,6 +437,12 @@ export class ApiService {
   getBnplAuditEvents(limit = 20): Observable<BnplAuditEventsResponse> {
     return this.http.get<BnplAuditEventsResponse>(`${this.base}/bnpl/audit/events`, {
       params: { limit }
+    });
+  }
+
+  getBnplLoans(userId: string, limit = 50): Observable<BnplLoanListResponse> {
+    return this.http.get<BnplLoanListResponse>(`${this.base}/bnpl/loans`, {
+      params: { user_id: userId, limit }
     });
   }
 
@@ -405,7 +494,8 @@ export class ApiService {
     amountMinor: number,
     currency: string,
     description: string,
-    prefill?: { name?: string; email?: string; contact?: string }
+    prefill?: { name?: string; email?: string; contact?: string },
+    checkoutConfig?: RazorpayCheckoutConfig
   ): Promise<RazorpaySuccessResponse> {
     await this.waitForRazorpayScript();
     const Razorpay = (window as any)['Razorpay'];
@@ -413,8 +503,13 @@ export class ApiService {
       throw new Error('Razorpay SDK not loaded');
     }
     return new Promise((resolve, reject) => {
+      const runtimeKey = String(checkoutConfig?.keyId || environment.razorpayKey || "").trim();
+      if (!runtimeKey) {
+        reject(new Error("Razorpay checkout key is not available."));
+        return;
+      }
       const options: RazorpayOptions = {
-        key: environment.razorpayKey,
+        key: runtimeKey,
         amount: amountMinor,
         currency: String(currency || "USD").toUpperCase(),
         name: 'Ping Masters',
@@ -426,6 +521,9 @@ export class ApiService {
           ondismiss: () => reject(new Error('Payment cancelled by user')),
         },
       };
+      if (checkoutConfig?.orderId) {
+        options.order_id = checkoutConfig.orderId;
+      }
       const rzp = new Razorpay(options);
       rzp.open();
     });

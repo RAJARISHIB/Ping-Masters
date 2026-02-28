@@ -295,4 +295,92 @@
     transform: none !important;
 }
 
+.ml-tier-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    padding: 2px 10px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    background: #f1f3f4;
+    color: #5f6368;
+}
+
+.ml-tier-low {
+    background: #e6f4ea;
+    color: #137333;
+}
+
+.ml-tier-medium {
+    background: #fef7e0;
+    color: #8a6d00;
+}
+
+.ml-tier-high,
+.ml-tier-critical {
+    background: #fce8e6;
+    color: #c5221f;
+}
+
+.ml-insight-block {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid #e8eaed;
+    background: #f8f9fa;
+}
+
+.ml-block-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: #5f6368;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.ml-mini-card {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px;
+    border-radius: 8px;
+    border: 1px solid #e8eaed;
+    background: #fff;
+}
+
+.ml-mini-label {
+    font-size: 10px;
+    font-weight: 700;
+    color: #9aa0a6;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.ml-mini-value {
+    font-size: 13px;
+    font-weight: 700;
+    color: #202124;
+}
+
+.ml-mini-sub {
+    font-size: 11px;
+    color: #5f6368;
+}
+
+.ml-action-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 8px;
+    border-radius: 999px;
+    border: 1px solid #d2e3fc;
+    background: #e8f0fe;
+    color: #1a73e8;
+    font-size: 11px;
+    font-weight: 600;
+}
 

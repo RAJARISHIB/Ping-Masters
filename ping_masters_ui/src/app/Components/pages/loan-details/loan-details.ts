@@ -2,8 +2,8 @@ import { Component, OnInit } from "@angular/core";
 import { ActivatedRoute, Router } from "@angular/router";
 import { SharedModule } from "../../../app.module";
 import { FormsModule } from "@angular/forms";
-import { forkJoin, of } from "rxjs";
-import { catchError, finalize } from "rxjs/operators";
+import { firstValueFrom, of } from "rxjs";
+import { catchError, timeout } from "rxjs/operators";
 import { ApiService } from "../../../services/api.service";
 import { CurrencySymbolService } from "../../../services/currency-symbol.service";
 
@@ -45,12 +45,15 @@ interface LoanData {
     imports: [SharedModule, FormsModule],
 })
 export class LoanDetails implements OnInit {
+    private attemptedRedirectFromMissingLoan = false;
+
     loan: LoanData | null = null;
     isEditingTitle = false;
     editedTitle = "";
     isPayingInstallment = false;
     loading = false;
     razorpayAvailable = false;
+    razorpayCheckoutKey = "";
     explainabilityReasons: string[] = [];
     recommendedTopupToken = 0;
     safetyColor = "";
@@ -85,7 +88,7 @@ export class LoanDetails implements OnInit {
         this.loadUserCurrencyContext();
         const id = this.route.snapshot.paramMap.get("id") || "";
         if (!id) return;
-        this.loadLoan(id);
+        void this.loadLoan(id);
     }
 
     private loadUserCurrencyContext(): void {
@@ -102,54 +105,164 @@ export class LoanDetails implements OnInit {
         });
     }
 
-    private loadLoan(id: string): void {
+    private async loadLoan(id: string): Promise<void> {
         this.loading = true;
-        forkJoin({
-            safety: this.api.getBnplSafetyMeter(id),
-            proof: this.api.getBnplProof(id),
-            explainability: this.api.getBnplExplainability(id).pipe(catchError(() => of({ reasons: [] }))),
-            deposit: this.api.getBnplDepositRecommendation(id, true).pipe(catchError(() => of(null))),
-            razorpay: this.api.getRazorpayStatus().pipe(catchError(() => of({ available: false, configured: false, enabled: false }))),
-        })
-            .pipe(finalize(() => { this.loading = false; }))
-            .subscribe({
-                next: ({ safety, proof, explainability, deposit, razorpay }) => {
-                    this.safetyColor = String(safety.safety_color || "");
-                    this.explainabilityReasons = Array.isArray(explainability.reasons) ? explainability.reasons : [];
-                    const depositRecord = (deposit as Record<string, any> | null) || null;
-                    this.recommendedTopupToken = Number((depositRecord ? depositRecord["topup_token"] : 0) || 0);
-                    this.razorpayAvailable = !!razorpay.available;
-                    this.loan = this.mapToLoanData(id, safety as Record<string, any>, proof as Record<string, any>);
-                    this.editedTitle = this.loan.title;
-                },
-                error: () => {
-                    this.loan = null;
-                    this.razorpayAvailable = false;
-                    this.explainabilityReasons = [];
-                    this.recommendedTopupToken = 0;
-                    this.safetyColor = "";
-                },
+        let loanMeta: Record<string, any> | null = null;
+        let safetyPayload: Record<string, any> = {};
+        let proofPayload: Record<string, any> = {};
+        try {
+            const loanList = await firstValueFrom(
+                this.api.getBnplLoans(this.userId, 200).pipe(
+                    timeout(30000),
+                    catchError(() => of({ loans: [] as Array<Record<string, any>> })),
+                ),
+            );
+            const loanRows = Array.isArray((loanList as Record<string, any>)["loans"])
+                ? ((loanList as Record<string, any>)["loans"] as Array<Record<string, any>>)
+                : [];
+            loanMeta = loanRows.find((row) => {
+                const rowId = String(row["loan_id"] || row["id"] || "").trim();
+                return rowId === id;
+            }) || null;
+
+            if (loanMeta) {
+                this.loan = this.mapToLoanData(id, {}, {}, loanMeta);
+                this.editedTitle = this.loan.title;
+            }
+
+            const [safetyResult, proofResult] = await Promise.allSettled([
+                firstValueFrom(this.api.getBnplSafetyMeter(id).pipe(timeout(60000))),
+                firstValueFrom(this.api.getBnplProof(id).pipe(timeout(60000))),
+            ]);
+
+            if (safetyResult.status === "fulfilled" && safetyResult.value) {
+                safetyPayload = safetyResult.value as Record<string, any>;
+            }
+            if (proofResult.status === "fulfilled" && proofResult.value) {
+                proofPayload = proofResult.value as Record<string, any>;
+            }
+
+            if (loanMeta || Object.keys(safetyPayload).length > 0 || Object.keys(proofPayload).length > 0) {
+                this.loan = this.mapToLoanData(id, safetyPayload, proofPayload, loanMeta);
+                this.editedTitle = this.loan.title;
+                this.safetyColor = String(safetyPayload["safety_color"] || this.safetyColor || "");
+                this.attemptedRedirectFromMissingLoan = false;
+                this.loadLoanOptionalPanels(id);
+                return;
+            }
+
+            this.loan = null;
+            this.razorpayAvailable = false;
+            this.razorpayCheckoutKey = "";
+            this.explainabilityReasons = [];
+            this.recommendedTopupToken = 0;
+            this.safetyColor = "";
+            this.redirectToExistingLoanIfAny(id);
+        } catch {
+            this.loan = null;
+            this.razorpayAvailable = false;
+            this.razorpayCheckoutKey = "";
+            this.explainabilityReasons = [];
+            this.recommendedTopupToken = 0;
+            this.safetyColor = "";
+            this.redirectToExistingLoanIfAny(id);
+        } finally {
+            this.loading = false;
+        }
+    }
+
+    private loadLoanOptionalPanels(loanId: string): void {
+        this.api
+            .getBnplExplainability(loanId)
+            .pipe(timeout(20000), catchError(() => of({ reasons: [] })))
+            .subscribe((explainability) => {
+                this.explainabilityReasons = Array.isArray((explainability as Record<string, any>)["reasons"])
+                    ? ((explainability as Record<string, any>)["reasons"] as string[])
+                    : [];
+            });
+
+        this.api
+            .getBnplDepositRecommendation(loanId, true)
+            .pipe(timeout(20000), catchError(() => of(null)))
+            .subscribe((deposit) => {
+                const depositRecord = (deposit as Record<string, any> | null) || null;
+                this.recommendedTopupToken = Number((depositRecord ? depositRecord["topup_token"] : 0) || 0);
+            });
+
+        this.api
+            .getRazorpayStatus()
+            .pipe(timeout(20000), catchError(() => of({ available: false, checkout_key_id: "" })))
+            .subscribe((razorpay) => {
+                this.razorpayAvailable = !!(razorpay as Record<string, any>)["available"];
+                this.razorpayCheckoutKey = String((razorpay as Record<string, any>)["checkout_key_id"] || "").trim();
             });
     }
 
-    private mapToLoanData(id: string, safetyRes: Record<string, any>, proofRes: Record<string, any>): LoanData {
-        const proofLoan = proofRes["loan"] || {};
+    private redirectToExistingLoanIfAny(currentLoanId: string): void {
+        if (this.attemptedRedirectFromMissingLoan || !this.userId) return;
+        this.attemptedRedirectFromMissingLoan = true;
+        this.api
+            .getBnplLoans(this.userId, 50)
+            .pipe(catchError(() => of({ loans: [] as Array<Record<string, any>> })))
+            .subscribe((response) => {
+                const rows = Array.isArray(response?.loans) ? response.loans : [];
+                const candidate = rows.find((row) => {
+                    const loanId = String(row["loan_id"] || row["id"] || "").trim();
+                    return !!loanId && loanId !== currentLoanId;
+                });
+                const fallbackLoanId = String(candidate?.["loan_id"] || candidate?.["id"] || "").trim();
+                if (fallbackLoanId) {
+                    void this.router.navigate(["/loan-details", fallbackLoanId], { replaceUrl: true });
+                }
+            });
+    }
+
+    private mapToLoanData(
+        id: string,
+        safetyRes: Record<string, any>,
+        proofRes: Record<string, any>,
+        loanMeta: Record<string, any> | null,
+    ): LoanData {
+        const proofLoan = proofRes["loan"] || loanMeta || {};
         const proofFinancial = proofRes["financial_summary"] || {};
         const proofCollateral = proofRes["collateral"] || {};
         const proofThresholds = proofRes["thresholds"] || {};
         const proofTimeline = proofRes["timeline"] || {};
+        const collateralProofs = Array.isArray(proofRes["collateral_proofs"]) ? proofRes["collateral_proofs"] : [];
+        const primaryCollateralProof = (collateralProofs[0] || {}) as Record<string, any>;
 
         const currencyCode = String(proofLoan["currency"] || this.userCurrencyCode || "USD").toUpperCase();
         const currencySymbol = this.currencySymbols.resolveSymbol(currencyCode, this.userCurrencyCode);
 
-        const principalMinor = Number(proofLoan["principal_minor"] ?? proofFinancial["principal_minor"] ?? 0);
+        const baseOutstandingMinor = Number(
+            safetyRes["outstanding_minor"] ?? proofFinancial["outstanding_minor"] ?? proofLoan["outstanding_minor"] ?? 0,
+        );
+        const principalMinor = Number(
+            proofLoan["principal_minor"]
+            ?? proofFinancial["principal_minor"]
+            ?? proofLoan["borrow_limit_minor"]
+            ?? baseOutstandingMinor,
+        );
         const outstandingMinor = Number(
-            safetyRes["outstanding_minor"] ?? proofFinancial["outstanding_minor"] ?? principalMinor
+            safetyRes["outstanding_minor"] ?? proofFinancial["outstanding_minor"] ?? proofLoan["outstanding_minor"] ?? principalMinor
         );
         const paidMinor = Math.max(0, principalMinor - outstandingMinor);
 
-        const collateralUnits = Number(proofCollateral["deposited_units"] ?? proofCollateral["locked_token"] ?? 0);
-        const collateralValueMinor = Number(safetyRes["collateral_value_minor"] ?? 0);
+        const collateralValueMinor = Number(
+            safetyRes["collateral_value_minor"]
+            ?? proofCollateral["collateral_value_minor"]
+            ?? primaryCollateralProof["collateral_value_minor"]
+            ?? 0,
+        );
+        let collateralUnits = Number(
+            proofCollateral["deposited_units"]
+            ?? proofCollateral["locked_token"]
+            ?? primaryCollateralProof["deposited_units"]
+            ?? 0,
+        );
+        if (collateralUnits <= 0 && collateralValueMinor > 0) {
+            collateralUnits = Number((collateralValueMinor / 100).toFixed(4));
+        }
         const currentPrice = collateralUnits > 0 ? (collateralValueMinor / 100) / collateralUnits : 0;
         const liquidationPrice = Number(proofLoan["liquidation_price"] ?? proofThresholds["liquidation_price"] ?? 0);
 
@@ -282,6 +395,8 @@ export class LoanDetails implements OnInit {
                             amountPaise,
                             this.loan?.currencyCode || this.userCurrencyCode || "USD",
                             `Installment #${pending.number} - ${this.loan?.title}`,
+                            undefined,
+                            { keyId: this.razorpayCheckoutKey },
                         )
                         .then((paymentRes) => {
                             this.isPayingInstallment = false;
