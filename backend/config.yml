@@ -1,13 +1,13 @@
 app:
   name: "Ping Masters API"
   debug: true
-  host: "127.0.0.1"
+  host: "host_url"
   port: 8000
 
 firebase:
   enabled: true
-  project_id: "pingmasters-e90a2"
-  credentials_path: "D:\\projects\\Ping-Masters\\backend\\firebase_private.json"
+  project_id: "xxxxxxxxxxxxxxxxxxxxxxxxxx"
+  credentials_path: "xxxxxxxx\\xxxxxxxxx\\firebase_private.json"
   users_collection: "test_users"
   profile_collection: "user"
 
