@@ -403,7 +403,13 @@ export class Transaction implements OnInit, OnDestroy {
         if (!razorpayStatus.available) {
             throw new Error("Razorpay is unavailable");
         }
-        await this.api.openRazorpayCheckout(principalMinor, currencyCode, `Loan disbursement - ${loan.loanName}`);
+        await this.api.openRazorpayCheckout(
+            principalMinor,
+            currencyCode,
+            `Loan disbursement - ${loan.loanName}`,
+            undefined,
+            { keyId: String(razorpayStatus.checkout_key_id || "").trim() },
+        );
         await this.delay(600);
         this.completeStep(3);
 

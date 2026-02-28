@@ -1,10 +1,17 @@
 import { Component, OnDestroy, OnInit } from "@angular/core";
 import { Router } from "@angular/router";
 import { FormsModule } from "@angular/forms";
-import { forkJoin, of } from "rxjs";
+import { firstValueFrom, forkJoin, of } from "rxjs";
 import { catchError } from "rxjs/operators";
 import { SharedModule } from "../../../app.module";
-import { ApiService } from "../../../services/api.service";
+import {
+    ApiService,
+    DefaultPredictionRequest,
+    DefaultPredictionResponse,
+    DepositRecommendationRequest,
+    DepositRecommendationResponse,
+    RiskFeatureInput,
+} from "../../../services/api.service";
 import { CurrencySymbolService } from "../../../services/currency-symbol.service";
 
 type EthereumProvider = {
@@ -48,6 +55,19 @@ export class Borrow implements OnInit, OnDestroy {
     creditScore = 742;
     riskTier = "MEDIUM";
     creditScoreLoading = false;
+    mlRiskLoading = false;
+    depositRecommendationLoading = false;
+    defaultPredictionLoading = false;
+    mlInsightsError = "";
+    mlModelRiskTier = "MEDIUM";
+    mlRiskProbabilities: Record<string, number> = {};
+    mlRiskReasons: string[] = [];
+    depositPolicyRecommendation: DepositRecommendationResponse | null = null;
+    depositMlRecommendation: DepositRecommendationResponse | null = null;
+    depositPolicyRequiredUser = 0;
+    depositMlRequiredUser = 0;
+    defaultPrediction: DefaultPredictionResponse | null = null;
+
     minBorrow = 500;
     maxBorrow = 50000;
 
@@ -64,6 +84,10 @@ export class Borrow implements OnInit, OnDestroy {
     userCurrencySymbol = "";
     userToUsdRate = 1.0;
     usdToUserRate = 1.0;
+    userOnTimePaymentCount = 0;
+    userLatePaymentCount = 0;
+    userTopupCount = 0;
+    userWalletAgeDays = 180;
 
     form: BorrowForm = {
         loanName: "",
@@ -80,6 +104,9 @@ export class Borrow implements OnInit, OnDestroy {
         { key: "phone", icon: "fa-solid fa-phone", label: "Phone" },
         { key: "telegram", icon: "fa-brands fa-telegram", label: "Telegram" },
     ];
+
+    private riskRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+    private mlRequestVersion = 0;
 
     get emiAmount(): number {
         if (!this.form.amount || !this.form.installments) return 0;
@@ -159,6 +186,18 @@ export class Borrow implements OnInit, OnDestroy {
             const currencyCode = String(user?.currency_code || this.userCurrencyCode || "USD").toUpperCase();
             this.userCurrencyCode = currencyCode;
             this.userCurrencySymbol = this.currencySymbols.resolveSymbol(currencyCode);
+            this.userOnTimePaymentCount = Number(user?.["on_time_payment_count"] || 0);
+            this.userLatePaymentCount = Number(user?.["late_payment_count"] || 0);
+            this.userTopupCount = Number(user?.["top_up_count"] || 0);
+
+            const createdAtRaw = String(user?.["created_at"] || "").trim();
+            if (createdAtRaw) {
+                const createdAt = new Date(createdAtRaw);
+                if (!Number.isNaN(createdAt.getTime())) {
+                    const ageMs = Date.now() - createdAt.getTime();
+                    this.userWalletAgeDays = Math.max(1, Math.floor(ageMs / (24 * 60 * 60 * 1000)));
+                }
+            }
             this.bootstrapFxRates();
             this.loadEligibility();
             this.loadEmiPlans();
@@ -308,7 +347,19 @@ export class Borrow implements OnInit, OnDestroy {
     }
 
     loadRiskScore(): void {
-        if (!this.connectedWallet || !this.form.amount || !this.bnbPriceUsd) return;
+        if (!this.connectedWallet || !this.form.amount || !this.bnbPriceUsd) {
+            this.mlInsightsError = "";
+            this.mlModelRiskTier = this.riskTier;
+            this.mlRiskProbabilities = {};
+            this.mlRiskReasons = [];
+            this.depositPolicyRecommendation = null;
+            this.depositMlRecommendation = null;
+            this.defaultPrediction = null;
+            this.mlRiskLoading = false;
+            this.depositRecommendationLoading = false;
+            this.defaultPredictionLoading = false;
+            return;
+        }
 
         const debtUsd = this.convertUserToUsd(this.form.amount);
         if (debtUsd <= 0) return;
@@ -327,14 +378,240 @@ export class Borrow implements OnInit, OnDestroy {
                     this.riskTier = res.prediction?.risk_tier ?? "MEDIUM";
                     const probability = Number(res.prediction?.liquidation_probability ?? 0.3);
                     this.creditScore = Math.round(900 - probability * 600);
+                    void this.refreshMlInsights();
                 },
                 error: () => {
                     this.creditScoreLoading = false;
+                    void this.refreshMlInsights();
                 },
             });
     }
 
-    ngOnDestroy(): void {}
+    onAmountChanged(): void {
+        this.scheduleRiskRefresh();
+    }
+
+    private scheduleRiskRefresh(delayMs: number = 320): void {
+        if (this.riskRefreshTimer) {
+            clearTimeout(this.riskRefreshTimer);
+        }
+        this.riskRefreshTimer = setTimeout(() => {
+            this.loadRiskScore();
+        }, delayMs);
+    }
+
+    get isMlInsightsLoading(): boolean {
+        return this.mlRiskLoading || this.depositRecommendationLoading || this.defaultPredictionLoading;
+    }
+
+    private getDerivedOnTimeRatio(): number {
+        const onTime = Math.max(0, this.userOnTimePaymentCount);
+        const late = Math.max(0, this.userLatePaymentCount);
+        const total = onTime + late;
+        if (total <= 0) return 0.85;
+        return Math.max(0, Math.min(1, onTime / total));
+    }
+
+    private normalizeMlReasons(rawReasons: Array<Record<string, any> | string> = []): string[] {
+        const reasons: string[] = [];
+        rawReasons.forEach((reason) => {
+            if (typeof reason === "string" && reason.trim()) {
+                reasons.push(reason.trim());
+                return;
+            }
+            if (reason && typeof reason === "object") {
+                const feature = String(reason["feature"] || "").replace(/_/g, " ").trim();
+                const direction = String(reason["direction"] || "").trim();
+                if (!feature) return;
+                if (direction === "decrease_risk") {
+                    reasons.push(`${feature} is reducing risk`);
+                } else {
+                    reasons.push(`${feature} is increasing risk`);
+                }
+            }
+        });
+        return reasons.slice(0, 3);
+    }
+
+    private async convertAmount(
+        amount: number,
+        fromCurrency: string,
+        toCurrency: string,
+    ): Promise<number> {
+        if (!Number.isFinite(amount) || amount <= 0) return 0;
+        const from = String(fromCurrency || "").toUpperCase();
+        const to = String(toCurrency || "").toUpperCase();
+        if (!from || !to || from === to) return amount;
+
+        try {
+            const converted = await firstValueFrom(this.api.convertCurrency(amount, from, to));
+            const direct = Number(converted?.converted_amount || 0);
+            if (direct > 0) return direct;
+            const rate = Number(converted?.rate || 0);
+            if (rate > 0) return amount * rate;
+        } catch {
+            // Ignore API conversion failure and continue with local fallbacks.
+        }
+
+        if (from === this.userCurrencyCode && to === "USD") {
+            return this.convertUserToUsd(amount);
+        }
+        if (from === "USD" && to === this.userCurrencyCode) {
+            return this.convertUsdToUser(amount);
+        }
+        if (from === this.userCurrencyCode && to === "INR") {
+            const usd = this.convertUserToUsd(amount);
+            const usdToInr = await this.convertAmount(1, "USD", "INR");
+            return usdToInr > 0 ? usd * usdToInr : amount;
+        }
+        if (from === "INR" && to === this.userCurrencyCode) {
+            const inrToUsd = await this.convertAmount(1, "INR", "USD");
+            const usd = inrToUsd > 0 ? amount * inrToUsd : amount;
+            return this.convertUsdToUser(usd);
+        }
+        return amount;
+    }
+
+    private async refreshMlInsights(): Promise<void> {
+        if (!this.connectedWallet || !this.form.amount || this.form.amount <= 0 || this.bnbPrice <= 0) {
+            return;
+        }
+
+        const requestVersion = ++this.mlRequestVersion;
+        this.mlInsightsError = "";
+        this.mlRiskLoading = true;
+        this.depositRecommendationLoading = true;
+        this.defaultPredictionLoading = true;
+
+        try {
+            const amountUser = Number(this.form.amount || 0);
+            const tenureDays = Math.max(1, this.form.installments * 30);
+            const installmentAmountUser = amountUser / Math.max(1, this.form.installments);
+
+            const planAmountInr = await this.convertAmount(amountUser, this.userCurrencyCode, "INR");
+            const installmentAmountInr = await this.convertAmount(installmentAmountUser, this.userCurrencyCode, "INR");
+            let bnbPriceInr = await this.convertAmount(this.bnbPrice, this.userCurrencyCode, "INR");
+            if (bnbPriceInr <= 0 && this.bnbPriceUsd > 0) {
+                bnbPriceInr = await this.convertAmount(this.bnbPriceUsd, "USD", "INR");
+            }
+            const inrToUserRate = await this.convertAmount(1, "INR", this.userCurrencyCode);
+            const outstandingInr = Math.max(planAmountInr, installmentAmountInr);
+            const collateralValueInr = Math.max(0, this.collateralRequired * bnbPriceInr);
+            const safetyRatio = outstandingInr > 0 ? (collateralValueInr / outstandingInr) : 1;
+            const onTimeRatio = this.getDerivedOnTimeRatio();
+            const missedCount = Math.max(0, this.userLatePaymentCount);
+
+            const riskPayload: RiskFeatureInput = {
+                safety_ratio: Math.max(0.000001, safetyRatio),
+                missed_payment_count: missedCount,
+                on_time_ratio: onTimeRatio,
+                avg_delay_hours: missedCount > 0 ? 12 : 0,
+                topup_count_last_30d: Math.max(0, this.userTopupCount),
+                plan_amount: Math.max(1, planAmountInr),
+                tenure_days: tenureDays,
+                installment_amount: Math.max(1, installmentAmountInr),
+            };
+
+            let mlRiskTier = this.riskTier;
+            try {
+                const score = await firstValueFrom(this.api.mlScore(riskPayload));
+                if (requestVersion !== this.mlRequestVersion) return;
+                mlRiskTier = String(score?.risk_tier || this.riskTier || "MEDIUM").toUpperCase();
+                this.mlModelRiskTier = mlRiskTier;
+                this.mlRiskProbabilities = score?.probabilities || {};
+                this.mlRiskReasons = this.normalizeMlReasons(score?.top_reasons || []);
+            } catch {
+                if (requestVersion !== this.mlRequestVersion) return;
+                this.mlModelRiskTier = String(this.riskTier || "MEDIUM").toUpperCase();
+                this.mlRiskProbabilities = {};
+                this.mlRiskReasons = [];
+            } finally {
+                if (requestVersion === this.mlRequestVersion) {
+                    this.mlRiskLoading = false;
+                }
+            }
+
+            const depositPayload: DepositRecommendationRequest = {
+                plan_amount_inr: Math.max(1, planAmountInr),
+                tenure_days: tenureDays,
+                risk_tier: String(mlRiskTier || this.riskTier || "MEDIUM").toUpperCase(),
+                collateral_token: "BNB",
+                collateral_type: "volatile",
+                locked_token: 0,
+                price_inr: Math.max(1, bnbPriceInr),
+                outstanding_debt_inr: Math.max(1, outstandingInr),
+            };
+
+            const [policyResult, mlResult] = await Promise.all([
+                firstValueFrom(this.api.recommendDepositPolicy(depositPayload)).catch(() => null),
+                firstValueFrom(this.api.recommendDepositMl(depositPayload)).catch(() => null),
+            ]);
+
+            if (requestVersion !== this.mlRequestVersion) return;
+            this.depositPolicyRecommendation = policyResult;
+            this.depositMlRecommendation = mlResult;
+            this.depositPolicyRequiredUser = policyResult ? Number(policyResult.required_inr || 0) * inrToUserRate : 0;
+            this.depositMlRequiredUser = mlResult ? Number(mlResult.required_inr || 0) * inrToUserRate : 0;
+            this.depositRecommendationLoading = false;
+
+            const defaultPayload: DefaultPredictionRequest = {
+                user_id: this.userId,
+                plan_id: `sim-${this.userId || "user"}-${Date.now()}`,
+                installment_id: "installment-1",
+                cutoff_at: new Date().toISOString(),
+                on_time_ratio: onTimeRatio,
+                missed_count_90d: missedCount,
+                max_days_late_180d: missedCount > 0 ? 3 : 0,
+                avg_days_late: missedCount > 0 ? 1.5 : 0,
+                days_since_last_late: missedCount > 0 ? 7 : 90,
+                consecutive_on_time_count: Math.max(0, this.userOnTimePaymentCount),
+                plan_amount: Math.max(1, planAmountInr),
+                tenure_days: tenureDays,
+                installment_amount: Math.max(1, installmentAmountInr),
+                installment_number: 1,
+                days_until_due: 30,
+                current_safety_ratio: Math.max(0.000001, safetyRatio),
+                distance_to_liquidation_threshold: Math.max(-5, safetyRatio - 1),
+                collateral_type: "volatile",
+                collateral_volatility_bucket: "high",
+                topup_count_30d: Math.max(0, this.userTopupCount),
+                topup_recency_days: this.userTopupCount > 0 ? 7 : 30,
+                opened_app_last_7d: 1,
+                clicked_pay_now_last_7d: 0,
+                payment_attempt_failed_count: missedCount > 0 ? 1 : 0,
+                wallet_age_days: Math.max(1, this.userWalletAgeDays),
+                tx_count_30d: Math.max(1, this.userOnTimePaymentCount + this.userLatePaymentCount),
+                stablecoin_balance_bucket: safetyRatio > 1.35 ? "high" : "medium",
+            };
+
+            try {
+                const prediction = await firstValueFrom(this.api.predictDefault(defaultPayload));
+                if (requestVersion !== this.mlRequestVersion) return;
+                this.defaultPrediction = prediction;
+            } catch {
+                if (requestVersion !== this.mlRequestVersion) return;
+                this.defaultPrediction = null;
+            } finally {
+                if (requestVersion === this.mlRequestVersion) {
+                    this.defaultPredictionLoading = false;
+                }
+            }
+        } catch {
+            if (requestVersion === this.mlRequestVersion) {
+                this.mlInsightsError = "Unable to refresh ML insights right now.";
+                this.mlRiskLoading = false;
+                this.depositRecommendationLoading = false;
+                this.defaultPredictionLoading = false;
+            }
+        }
+    }
+
+    ngOnDestroy(): void {
+        if (this.riskRefreshTimer) {
+            clearTimeout(this.riskRefreshTimer);
+            this.riskRefreshTimer = null;
+        }
+    }
 
     private buildPath(): void {
         if (!this.priceHistory.length) {
@@ -405,7 +682,7 @@ export class Borrow implements OnInit, OnDestroy {
 
     onInstallmentsChange(): void {
         this.setRepaymentDate();
-        this.loadRiskScore();
+        this.scheduleRiskRefresh(120);
     }
 
     toggleNotification(key: string): void {

@@ -27,7 +27,7 @@ class CollateralModel(BaseDocumentModel):
     asset_type: str = Field(default="TOKEN")
     decimals: int = Field(default=18, ge=0, le=30)
 
-    deposited_units: int = Field(..., ge=0)
+    deposited_units: float = Field(..., ge=0.0)
     collateral_value_minor: Money = Field(..., ge=0)
     oracle_price_minor: Money = Field(..., ge=0)
 

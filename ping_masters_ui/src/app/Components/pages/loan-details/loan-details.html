@@ -1,8 +1,4 @@
-<div *ngIf="loading" class="h-screen w-screen flex flex-col items-center justify-center gap-3">
-    <span class="text-sm text-gray-500">Loading loan details from backend...</span>
-</div>
-
-<div class="loan-page" *ngIf="!loading && loan; else notFound">
+<div class="loan-page" *ngIf="loan; else notFound">
 
     <!-- Header -->
     <header class="loan-header flex items-center justify-between px-8 py-3">
@@ -256,7 +252,7 @@
 </div>
 
 <ng-template #notFound>
-    <div class="h-screen w-screen flex flex-col items-center justify-center gap-4">
+    <div *ngIf="!loading" class="h-screen w-screen flex flex-col items-center justify-center gap-4">
         <span class="text-gray-400 text-lg">Loan not found</span>
         <button class="text-blue-600 text-sm hover:underline" (click)="goBack()">← Back to Board</button>
     </div>

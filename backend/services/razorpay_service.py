@@ -38,6 +38,39 @@ class RazorpayService:
         """Return whether required API credentials are available."""
         return self._enabled and bool(self._key_id and self._key_secret)
 
+    @property
+    def is_test_mode(self) -> bool:
+        """Return whether configured credentials are explicitly test-mode."""
+        return self.key_mode == "test"
+
+    @property
+    def key_mode(self) -> str:
+        """Return credential mode based on key prefix."""
+        if self._key_id.startswith("rzp_test_"):
+            return "test"
+        if self._key_id.startswith("rzp_live_"):
+            return "live"
+        return "unknown"
+
+    @property
+    def key_id_masked(self) -> str:
+        """Return masked key id for safe diagnostics."""
+        if not self._key_id:
+            return ""
+        if len(self._key_id) <= 8:
+            return self._key_id[:2] + "***"
+        return "{0}***{1}".format(self._key_id[:8], self._key_id[-4:])
+
+    @property
+    def api_base_url(self) -> str:
+        """Return configured Razorpay base URL."""
+        return self._api_base_url
+
+    @property
+    def public_key_id(self) -> str:
+        """Return Razorpay public key id for checkout usage."""
+        return self._key_id
+
     def _auth_header(self) -> str:
         """Build HTTP basic auth header value."""
         token = "{0}:{1}".format(self._key_id, self._key_secret).encode("utf-8")
@@ -47,6 +80,12 @@ class RazorpayService:
         """Execute authenticated Razorpay JSON request."""
         if not self.is_configured:
             raise RuntimeError("Razorpay is not configured. Check razorpay.enabled/key_id/key_secret.")
+        if not self.is_test_mode:
+            raise RuntimeError(
+                "Razorpay test mode is enforced. Configure an rzp_test_* key_id (current mode={0}).".format(
+                    self.key_mode
+                )
+            )
 
         url = "{0}{1}".format(self._api_base_url, path)
         data = None
@@ -111,17 +150,25 @@ class RazorpayService:
         """Create Razorpay payment link for autopay/mandate simulation."""
         if amount_minor <= 0:
             raise ValueError("amount_minor must be > 0")
+        customer_payload: Dict[str, str] = {}
+        if customer:
+            for key in ("name", "email", "contact"):
+                value = str(customer.get(key, "")).strip()
+                if value:
+                    customer_payload[key] = value
+        notify_email = bool(customer_payload.get("email"))
+        notify_sms = bool(customer_payload.get("contact"))
         payload: Dict[str, Any] = {
             "amount": int(amount_minor),
             "currency": currency.upper(),
             "description": description,
-            "notify": {"sms": True, "email": True},
+            "notify": {"sms": notify_sms, "email": notify_email},
             "notes": notes or {},
             "reminder_enable": True,
             "accept_partial": False,
         }
-        if customer:
-            payload["customer"] = customer
+        if customer_payload:
+            payload["customer"] = customer_payload
         return self._request_json("POST", "/v1/payment_links", payload)
 
     def create_refund(
@@ -141,3 +188,16 @@ class RazorpayService:
             payload["amount"] = int(amount_minor)
         path = "/v1/payments/{0}/refund".format(normalized_payment_id)
         return self._request_json("POST", path, payload)
+
+    def verify_credentials(self) -> Dict[str, Any]:
+        """Verify current credentials by calling a read-only Razorpay endpoint."""
+        result = self._request_json("GET", "/v1/orders?count=1")
+        items = result.get("items", []) if isinstance(result, dict) else []
+        return {
+            "ok": True,
+            "mode": self.key_mode,
+            "test_mode_enforced": True,
+            "key_id_masked": self.key_id_masked,
+            "api_base_url": self.api_base_url,
+            "sample_orders_count": len(items) if isinstance(items, list) else 0,
+        }
