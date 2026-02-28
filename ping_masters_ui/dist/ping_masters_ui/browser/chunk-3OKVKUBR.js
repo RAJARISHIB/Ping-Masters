@@ -1,0 +1,1 @@
+import{d as n,l as a,n as i,y as o}from"./chunk-RRZ5U6OK.js";var s=class r{eventSubject=new n;emit(t){this.eventSubject.next(t)}on(t){return this.eventSubject.asObservable().pipe(i(e=>e.key===t),a(e=>e.data))}static \u0275fac=function(e){return new(e||r)};static \u0275prov=o({token:r,factory:r.\u0275fac,providedIn:"root"})};export{s as a};
