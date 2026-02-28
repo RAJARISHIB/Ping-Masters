@@ -21,21 +21,36 @@ logger = logging.getLogger(__name__)
 _predictor: Any = None
 
 
+def _classify_risk_tier(liquidation_probability: float) -> str:
+    """Map liquidation probability to a stable risk tier label."""
+    if liquidation_probability < 0.10:
+        return "LOW"
+    if liquidation_probability < 0.30:
+        return "MEDIUM"
+    if liquidation_probability < 0.60:
+        return "HIGH"
+    return "CRITICAL"
+
+
 def _get_predictor() -> Any:
     """Return the singleton ``LiquidationPredictor``, creating it on first call."""
     global _predictor
     if _predictor is not None:
         return _predictor
+
     try:
-        from ml.inference.predictor import LiquidationPredictor
+        from ml.predictor import LiquidationPredictor
 
         _predictor = LiquidationPredictor()
         return _predictor
     except FileNotFoundError:
-        logger.warning("ML model not found — risk prediction will use fallback.")
+        logger.warning("ML model not found. Risk prediction will use fallback.")
         return None
-    except ImportError:
-        logger.warning("xgboost not installed — risk prediction unavailable.")
+    except ModuleNotFoundError as exc:
+        logger.info("Optional advanced predictor unavailable (%s). Using fallback heuristic.", exc)
+        return None
+    except ImportError as exc:
+        logger.info("Risk predictor dependency unavailable (%s). Using fallback heuristic.", exc)
         return None
     except Exception:
         logger.exception("Failed to initialise LiquidationPredictor.")
@@ -137,7 +152,6 @@ def _fallback_predict(
 ) -> Dict[str, Any]:
     """Rule-based fallback when ML model isn't available."""
     from common.protocol_constants import compute_health_factor
-    from ml.inference.predictor import classify_risk_tier
 
     collateral_value = collateral_bnb * current_price
     hf = compute_health_factor(collateral_value, debt_fiat)
@@ -157,7 +171,7 @@ def _fallback_predict(
 
     return {
         "liquidation_probability": prob,
-        "risk_tier": classify_risk_tier(prob),
+        "risk_tier": _classify_risk_tier(prob),
         "model_version": "fallback-heuristic",
     }
 
